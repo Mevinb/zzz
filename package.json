@@ -8,8 +8,9 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/test-pilot.cjs && node scripts/test-verification.cjs && node scripts/test-pr-flow.cjs",
+    "test": "node scripts/test-pilot.cjs && node scripts/test-verification.cjs && node scripts/test-pr-flow.cjs && node scripts/test-logs.cjs",
     "test:verification": "node scripts/test-verification.cjs",
+    "test:logs": "node scripts/test-logs.cjs",
     "test:pr": "node scripts/test-pr-flow.cjs",
     "test:browser": "playwright test",
     "benchmark": "node scripts/benchmark-pilot.cjs"
