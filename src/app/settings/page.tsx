@@ -2,7 +2,17 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { DEFAULT_SETTINGS, readSettings, writeSettings, type EngineSettings } from "@/lib/settings-client";
+import {
+  DEFAULT_SETTINGS,
+  readSettings,
+  writeSettings,
+  type EngineSettings,
+  OPENAI_HIGH_VOLUME_MODELS,
+  OPENAI_STANDARD_MODELS,
+  ALLOWED_OPENAI_MODELS,
+  DEFAULT_OPENAI_MODEL,
+  type AllowedOpenAIModel,
+} from "@/lib/settings-client";
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<EngineSettings>(() => {
@@ -23,7 +33,10 @@ export default function SettingsPage() {
 
   function save() {
     try {
-      writeSettings({ ...settings, openaiModel: settings.openaiModel.trim() || "gpt-5" });
+      const validModel = ALLOWED_OPENAI_MODELS.includes(settings.openaiModel as AllowedOpenAIModel)
+        ? settings.openaiModel
+        : DEFAULT_OPENAI_MODEL;
+      writeSettings({ ...settings, openaiModel: validModel });
       setSaved(true);
       setStorageError(null);
     } catch {
@@ -131,20 +144,30 @@ export default function SettingsPage() {
             <label htmlFor="openai-model" className="mt-3 block text-xs font-medium text-[#c9d1d9]">
               Model
             </label>
-            <input
+            <select
               id="openai-model"
-              type="text"
               value={settings.openaiModel}
               onChange={(event) => update({ openaiModel: event.target.value })}
-              placeholder="gpt-5"
-              autoComplete="off"
-              spellCheck={false}
               disabled={settings.provider !== "openai"}
-              className="mt-1 h-10 w-full rounded-md border border-[#30363d] bg-[#0d1117] px-3 font-mono text-sm outline-none placeholder:text-[#484f58] focus:border-[#58a6ff] disabled:cursor-not-allowed"
-            />
+              className="mt-1 h-10 w-full rounded-md border border-[#30363d] bg-[#0d1117] px-3 font-mono text-sm text-white outline-none focus:border-[#58a6ff] disabled:cursor-not-allowed cursor-pointer"
+            >
+              <optgroup label="High volume tier (up to 2.5M tokens/day)">
+                {OPENAI_HIGH_VOLUME_MODELS.map((m) => (
+                  <option key={m} value={m} className="bg-[#161b22] text-white">
+                    {m}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Standard tier (up to 250K tokens/day)">
+                {OPENAI_STANDARD_MODELS.map((m) => (
+                  <option key={m} value={m} className="bg-[#161b22] text-white">
+                    {m}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
             <p className="mt-2 text-xs leading-5 text-[#8b949e]">
-              A server-side <span className="font-mono">OPENAI_API_KEY</span> fills in when this field is empty. Never
-              share your key in chat or commit it anywhere.
+              Constrained strictly to your eligible free daily usage allowance: Up to 2.5M tokens/day across mini/nano models, and up to 250K tokens/day across standard models.
             </p>
           </div>
 

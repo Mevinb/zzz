@@ -1,5 +1,5 @@
 import { logError, logInfo, logWarn } from "@/lib/logger";
-import { createOpenAIRunner, OPENAI_DEFAULT_MODEL } from "@/lib/openai-provider";
+import { createOpenAIRunner, OPENAI_DEFAULT_MODEL, resolveAllowedModel } from "@/lib/openai-provider";
 import { streamPilotRun } from "@/lib/pilot";
 import type { RunEvent } from "@/lib/pilot-types";
 
@@ -15,7 +15,7 @@ function resolveProvider(requested: unknown): EngineProvider {
 
 export async function POST(request: Request) {
   let issueUrl = "";
-  let provider: EngineProvider = "local";
+  let provider: EngineProvider = resolveProvider(undefined);
   let openaiApiKey = "";
   let openaiModel = OPENAI_DEFAULT_MODEL;
   try {
@@ -24,7 +24,7 @@ export async function POST(request: Request) {
     issueUrl = body.issueUrl;
     provider = resolveProvider(body.provider);
     if (typeof body.openaiApiKey === "string") openaiApiKey = body.openaiApiKey.slice(0, 500);
-    if (typeof body.openaiModel === "string" && body.openaiModel.trim()) openaiModel = body.openaiModel.trim().slice(0, 80);
+    openaiModel = resolveAllowedModel(body.openaiModel);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Enter a valid GitHub issue URL.";
     logWarn("api/runs", `Rejected run request: ${message}`, { code: "bad_request" });
@@ -85,10 +85,23 @@ export async function POST(request: Request) {
       const dependencies = provider === "openai"
         ? { runCodex: createOpenAIRunner({ apiKey: engineKey, model: openaiModel }) }
         : {};
-      void streamPilotRun(issueUrl, emit, dependencies).finally(() => {
-        logInfo("api/runs", `Finished investigating issue: ${issueUrl}`);
-        if (!disconnected) controller.close();
-      });
+      void streamPilotRun(issueUrl, emit, dependencies)
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : "Investigation failed unexpectedly.";
+          emit({
+            type: "failed",
+            error: {
+              code: "FATAL_ERROR",
+              title: "Investigation interrupted",
+              message,
+              retryable: true,
+            },
+          });
+        })
+        .finally(() => {
+          logInfo("api/runs", `Finished investigating issue: ${issueUrl}`);
+          if (!disconnected) controller.close();
+        });
     },
     cancel() { disconnected = true; },
   });

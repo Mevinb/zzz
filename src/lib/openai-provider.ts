@@ -3,10 +3,53 @@ import "server-only";
 import { redactSecrets } from "./logger";
 import type { CodexRunner } from "./pilot";
 
-export const OPENAI_DEFAULT_MODEL = "gpt-5";
+export const OPENAI_HIGH_VOLUME_MODELS = [
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "gpt-5-mini",
+  "gpt-5-nano",
+  "gpt-4.1-mini",
+  "gpt-4.1-nano",
+  "gpt-4o-mini",
+  "o3-mini",
+  "o4-mini",
+] as const;
+
+export const OPENAI_STANDARD_MODELS = [
+  "gpt-5.4",
+  "gpt-5.2",
+  "gpt-5.1",
+  "gpt-5",
+  "gpt-4.1",
+  "gpt-4o",
+  "o1",
+  "o3",
+] as const;
+
+export const ALLOWED_OPENAI_MODELS = [
+  ...OPENAI_HIGH_VOLUME_MODELS,
+  ...OPENAI_STANDARD_MODELS,
+] as const;
+
+export type AllowedOpenAIModel = (typeof ALLOWED_OPENAI_MODELS)[number];
+
+export const OPENAI_DEFAULT_MODEL: AllowedOpenAIModel = "gpt-5-mini";
+
+export function isAllowedOpenAIModel(model: string): model is AllowedOpenAIModel {
+  return (ALLOWED_OPENAI_MODELS as readonly string[]).includes(model);
+}
+
+export function resolveAllowedModel(candidate?: unknown): AllowedOpenAIModel {
+  if (typeof candidate === "string" && isAllowedOpenAIModel(candidate.trim())) {
+    return candidate.trim() as AllowedOpenAIModel;
+  }
+  return OPENAI_DEFAULT_MODEL;
+}
+
 export const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_TIMEOUT_MS = 300_000;
-const OPENAI_MAX_OUTPUT_TOKENS = 32_000;
+const OPENAI_MAX_OUTPUT_TOKENS = 16_000;
+const MAX_API_RETRIES = 2;
 
 // Strict structured output only accepts a subset of JSON Schema keywords.
 // Length/range bounds (minLength, maxLength, minItems, maxItems, minimum,
@@ -71,6 +114,11 @@ function extractOutputText(data: unknown): string | null {
   if (!data || typeof data !== "object") return null;
   const record = data as Record<string, unknown>;
   if (typeof record.output_text === "string" && record.output_text.trim()) return record.output_text;
+  if (Array.isArray(record.choices) && record.choices.length > 0) {
+    const first = record.choices[0] as Record<string, unknown> | undefined;
+    const msg = first?.message as Record<string, unknown> | undefined;
+    if (typeof msg?.content === "string" && msg.content.trim()) return msg.content;
+  }
   const output = record.output;
   if (!Array.isArray(output)) return null;
   const texts: string[] = [];
@@ -78,11 +126,19 @@ function extractOutputText(data: unknown): string | null {
     if (!item || typeof item !== "object") continue;
     const message = item as Record<string, unknown>;
     const content = message.content;
+    if (typeof content === "string" && content.trim()) {
+      texts.push(content);
+      continue;
+    }
     if (!Array.isArray(content)) continue;
     for (const part of content) {
       if (!part || typeof part !== "object") continue;
       const chunk = part as Record<string, unknown>;
-      if (chunk.type === "output_text" && typeof chunk.text === "string" && chunk.text.trim()) {
+      if (
+        (chunk.type === "output_text" || chunk.type === "text") &&
+        typeof chunk.text === "string" &&
+        chunk.text.trim()
+      ) {
         texts.push(chunk.text);
       }
       if (chunk.type === "refusal" && typeof chunk.refusal === "string" && chunk.refusal.trim()) {
@@ -97,7 +153,7 @@ function extractOutputText(data: unknown): string | null {
 /** CodexRunner backed by the OpenAI Responses API with strict structured output. */
 export function createOpenAIRunner(options: OpenAIRunnerOptions): CodexRunner {
   const apiKey = options.apiKey?.trim() ?? "";
-  const model = options.model?.trim() || OPENAI_DEFAULT_MODEL;
+  const model = resolveAllowedModel(options.model);
   const fetchImpl = options.fetchImpl ?? fetch;
   if (!apiKey) {
     throw openaiError(
@@ -108,41 +164,55 @@ export function createOpenAIRunner(options: OpenAIRunnerOptions): CodexRunner {
     );
   }
   return async (prompt: string, schema?: object) => {
-    let response: Response;
-    try {
-      response = await fetchImpl(OPENAI_RESPONSES_URL, {
-        method: "POST",
-        // NOTE: request headers never appear in the errors constructed below,
-        // and response bodies are summarized — the key cannot leak into logs.
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          input: prompt,
-          ...(schema
-            ? {
-                text: {
-                  format: {
-                    type: "json_schema",
-                    name: "codex_output",
-                    schema: sanitizeSchemaForStrict(schema as JsonSchema),
-                    strict: true,
+    let response!: Response;
+    for (let retry = 0; retry <= MAX_API_RETRIES; retry++) {
+      try {
+        response = await fetchImpl(OPENAI_RESPONSES_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            input: prompt,
+            ...(schema
+              ? {
+                  text: {
+                    format: {
+                      type: "json_schema",
+                      name: "codex_output",
+                      schema: sanitizeSchemaForStrict(schema as JsonSchema),
+                      strict: true,
+                    },
                   },
-                },
-              }
-            : {}),
-          max_output_tokens: OPENAI_MAX_OUTPUT_TOKENS,
-        }),
-        signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS),
-      });
-    } catch (error) {
-      if (error instanceof Error && error.name === "TimeoutError") {
-        throw openaiError("OPENAI_TIMEOUT", `OpenAI step timed out (${model})`, "One OpenAI step exceeded the time limit. Retry — this restarts the run from scratch.", true);
+                }
+              : {}),
+            max_output_tokens: OPENAI_MAX_OUTPUT_TOKENS,
+          }),
+          signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS),
+        });
+      } catch (error) {
+        if (retry < MAX_API_RETRIES && !(error instanceof Error && error.name === "TimeoutError")) {
+          await new Promise((r) => setTimeout(r, (retry + 1) * 1500));
+          continue;
+        }
+        if (error instanceof Error && error.name === "TimeoutError") {
+          throw openaiError("OPENAI_TIMEOUT", `OpenAI step timed out (${model})`, "One OpenAI step exceeded the time limit. Retry — this restarts the run from scratch.", true);
+        }
+        throw openaiError("OPENAI_NETWORK_ERROR", "Could not reach the OpenAI API", "Check your connection and retry.", true);
       }
-      throw openaiError("OPENAI_NETWORK_ERROR", "Could not reach the OpenAI API", "Check your connection and retry.", true);
+
+      if (response.status === 429 || response.status >= 500) {
+        if (retry < MAX_API_RETRIES) {
+          const retryAfter = Number(response.headers?.get?.("retry-after")) || (retry + 1) * 2;
+          await new Promise((r) => setTimeout(r, Math.min(retryAfter * 1000, 8000)));
+          continue;
+        }
+      }
+      break;
     }
+
     if (response.status === 401) {
       throw openaiError("OPENAI_AUTH", "OpenAI rejected the API key", "The API key is invalid or revoked. Update it on the Settings page.", false);
     }

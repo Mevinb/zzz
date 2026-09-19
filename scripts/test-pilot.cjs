@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const load = require('./load-pilot.cjs');
 const { streamPilotRun, explorerSchema, plannerSchema, coderSchema, reviewSchema, planImplRecovery, findUninspectedImplCandidates } = load('pilot');
-const { normalizeQuery, candidateScore, relatedPaths, proposedDiff, extractStructuredRequirements, analysisSchema } = load('investigation');
+const { normalizeQuery, candidateScore, relatedPaths, proposedDiff, extractStructuredRequirements, analysisSchema, isImplementationIssue, checkTestImportsAgainstSource } = load('investigation');
 // Strict structured output rejects any object schema where a properties key is
 // missing from required (once broke every patch-writing call: missing 'role').
 function assertStrictSchema(name, schema) {
@@ -57,6 +57,20 @@ console.log('PASS agent schemas satisfy strict required-properties invariant');
   assert.equal(recovery.directive, null);
   assert.deepEqual(recovery.backroute, []);
 }
+// Plans with both implementation code and tests covering the same implementation requirement need no recovery.
+{
+  const recovery = planImplRecovery(
+    [
+      { file: 'src/google/adk/optimization/local_eval_sampler.py', requirementsCovered: ['R1'] },
+      { file: 'tests/unittests/optimization/test_local_eval_sampler.py', requirementsCovered: ['R1'] }
+    ],
+    [{ id: 'R1', type: 'mustImplement' }],
+    ['src/google/adk/optimization/local_eval_sampler.py', 'tests/unittests/optimization/test_local_eval_sampler.py'],
+    ['src/google/adk/optimization/local_eval_sampler.py', 'tests/unittests/optimization/test_local_eval_sampler.py']
+  );
+  assert.equal(recovery.directive, null);
+  assert.deepEqual(recovery.backroute, []);
+}
 assert.deepEqual(findUninspectedImplCandidates(['test/a.ts'], ['src/a.ts', 'src/a.ts'], ['src/a.ts']), []);
 console.log('PASS mis-aimed implementation plans get a recovery directive or back-route');
 const analysis = { kinds: ['validation'], summary: 'Reject empty names', expectedBehavior: 'Empty names rejected', observedBehavior: 'Empty names accepted', importantSymbols: ['validateName'], importantPaths: ['src/validator.ts'], errorMessages: [], likelyEvidenceSurfaces: ['validator', 'test'], maintainerClarifications: [], reproductionDetails: [], proposedApproaches: [], constraints: [] };
@@ -77,6 +91,20 @@ assert.equal(symbolOnly.length, 1);
 assert.doesNotMatch(symbolOnly[0].text, /unrelatedSymbol/);
 const maintainerRequirement = extractStructuredRequirements({ ...analysis, importantSymbols: [], maintainerClarifications: ['Maintainer: must preserve the legacy return value.'] }, 'Clarify behavior', '');
 assert.ok(maintainerRequirement.some((requirement) => requirement.type === 'mustPreserve'));
+const docAnalysis = { ...analysis, kinds: ['documentation'], importantSymbols: [] };
+assert.equal(isImplementationIssue(docAnalysis), false);
+const docRequirements = extractStructuredRequirements(docAnalysis, 'Add detailed documentation', '');
+assert.ok(docRequirements.every((r) => r.type === 'optionalDocs'));
+
+{
+  const testContent = "import { helper } from './test-helper';\nimport { validateName } from '../src/validator';";
+  const sourceContent = "export const validateName = (n: string) => n.length > 0;";
+  const allInspectedContent = "export const helper = () => true;";
+  const result = checkTestImportsAgainstSource(testContent, sourceContent, allInspectedContent, "test/validator.test.ts", ["src/validator.ts"]);
+  assert.equal(result.valid, true);
+  assert.equal(result.missingSymbol, undefined);
+}
+console.log('PASS checkTestImportsAgainstSource respects test helpers and inspected files');
 
 async function scenario(name, options = {}) {
   let gates = 0, reviews = 0, coderCalls = 0, malformed = 0, plans = 0, sawImplDirective = false;
@@ -89,7 +117,14 @@ async function scenario(name, options = {}) {
   const events = [];
   await streamPilotRun('https://github.com/fixture/repo/issues/1', (event) => events.push(structuredClone(event)), {
     github: async (path) => {
-      if (path.endsWith('/issues/1')) return { number: 1, title: 'Reject empty names', body: '## Requirements\n- validateName should reject empty strings\n- Preserve the existing public API\n- Add regression tests for empty names', comments: 0, html_url: 'https://github.com/fixture/repo/issues/1', state: 'open' };
+      if (path.endsWith('/issues/1')) return {
+        number: 1,
+        title: options.createDocsFile ? 'Reject empty names and update docs' : 'Reject empty names',
+        body: options.createDocsFile ? '## Requirements\n- validateName should reject empty strings\n- Update docs guide\n- Add regression tests' : '## Requirements\n- validateName should reject empty strings\n- Preserve the existing public API\n- Add regression tests for empty names',
+        comments: 0,
+        html_url: 'https://github.com/fixture/repo/issues/1',
+        state: options.closedIssue ? 'closed' : 'open',
+      };
       if (path.includes('/commits/')) return { sha: '0123456789abcdef0123456789abcdef01234567' };
       if (path.endsWith('/languages')) return { TypeScript: 100 };
       if (path.includes('/git/trees/')) return { tree: Object.keys(files).map((path) => ({ path, type: 'blob', size: 100 })), truncated: false };
@@ -98,7 +133,7 @@ async function scenario(name, options = {}) {
     },
     runCodex: async (prompt, schema) => {
       if (options.malformed && malformed++ < (options.recover ? 1 : 99)) return '{ broken';
-      if (schema.required.includes('kinds')) return JSON.stringify(analysis);
+      if (schema.required.includes('kinds')) return JSON.stringify(options.createDocsFile ? { ...analysis, summary: 'Reject empty names and update docs' } : analysis);
       if (schema.required.includes('decision')) {
         gates++;
         assert.ok(prompt.includes('priorSearchQueries') && prompt.includes('remainingSearchBudget'));
@@ -139,6 +174,13 @@ async function scenario(name, options = {}) {
             { file: 'test/validator.test.ts', operation: 'modify', action: 'Add regression test', reason: 'Verify the requested behavior', requirementsCovered: ['R3'] },
           ] });
         }
+        if (options.createDocsFile) {
+          return JSON.stringify({ goal: 'Add docs guide', filesAllowedToChange: ['docs/guide.md', 'src/validator.ts', 'test/validator.test.ts'], steps: [
+            { file: 'src/validator.ts', operation: 'modify', action: 'Update validator', reason: 'Validator API', requirementsCovered: ['R1', 'R2'] },
+            { file: 'docs/guide.md', operation: 'create', action: 'Create guide', reason: 'Documentation', requirementsCovered: ['R2'] },
+            { file: 'test/validator.test.ts', operation: 'modify', action: 'Update test', reason: 'Test API', requirementsCovered: ['R3'] },
+          ] });
+        }
         const file = invalid ? 'invented.ts' : options.pathAlias ? './src/validator.ts' : options.plannerBackroute ? 'src/follow20.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts';
         const filesToAllow = options.unsolicitedDocs ? ['src/validator.ts', 'README.md', 'test/validator.test.ts'] : options.testOnlyPatch ? ['src/validator.ts', 'test/validator.test.ts'] : [file, 'test/validator.test.ts'];
         const steps = filesToAllow.map((f) => ({ file: f, operation: 'modify', action: `Modify ${f}`, reason: 'Match requested behavior', requirementsCovered: f.includes('test/') ? ['R3'] : f === 'README.md' ? ['R2'] : ['R1', 'R2'] }));
@@ -169,6 +211,13 @@ async function scenario(name, options = {}) {
           return JSON.stringify({ changes: [
             { path: 'src/new-validator.ts', operation: 'create', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'New isolated validator API', role: 'source', requirementsCovered: ['R1', 'R2'] },
             { path: 'test/validator.test.ts', operation: 'modify', updatedContent: 'import { validateName } from "../src/new-validator";\nit("rejects empty names", () => { if (validateName("")) throw new Error("expected false"); });\n', explanation: 'Test new validator API', role: 'test', requirementsCovered: ['R3'] },
+          ] });
+        }
+        if (options.createDocsFile) {
+          return JSON.stringify({ changes: [
+            { path: 'src/validator.ts', operation: 'modify', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Validator API', role: 'source', requirementsCovered: ['R1', 'R2'] },
+            { path: 'docs/guide.md', operation: 'create', updatedContent: '# Guide\n', explanation: 'Guide', role: 'docs', requirementsCovered: ['R2'] },
+            { path: 'test/validator.test.ts', operation: 'modify', updatedContent: 'import { validateName } from "../src/validator";\nit("works", () => {});\n', explanation: 'Test', role: 'test', requirementsCovered: ['R3'] },
           ] });
         }
         if (options.unsolicitedDocs) {
@@ -256,6 +305,14 @@ async function scenario(name, options = {}) {
         assert.match(created.updatedContent, /validateName/);
         assert.match(created.diff, /new file mode/);
       }
+      if (options.createDocsFile) {
+        const created = run.files.find((file) => file.path === 'docs/guide.md');
+        assert.ok(created);
+        assert.equal(created.operation, 'create');
+      }
+      if (options.closedIssue) {
+        assert.ok(run.activity.some((a) => a.action === 'Issue is closed on GitHub'));
+      }
     }
     if (options.budget) { assert.equal(run.refusal.code, 'BUDGET_EXHAUSTED'); assert.doesNotMatch(run.refusal.suggestedNextStep, /runtime/); }
     if (options.revise || options.reviewFails) { assert.equal(reviews, 2); assert.equal(coderCalls, 2); }
@@ -295,6 +352,8 @@ async function scenario(name, options = {}) {
   await scenario('unsolicited docs change rejected by pre-review static gate', { unsolicitedDocs: true });
   await scenario('pre-review static gate triggers repair loop and recovers', { gateRepair: true });
   await scenario('planner aimed at tests is redirected to implementation files', { repairImplMapping: true });
+  await scenario('closed issue proceeds with a warning and finishes', { closedIssue: true });
+  await scenario('new file allowed beneath docs creation root', { createDocsFile: true });
   process.env.GITHUB_PR_TOKEN = 'sentinel-codex-stderr-9z9z';
   try {
     await scenario('codex failure at writing keeps evidence and names the stage', { codexFailsAtCoder: true });

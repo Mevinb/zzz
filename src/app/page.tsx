@@ -3,11 +3,18 @@
 import { FormEvent, useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import type { Activity, InspectedFile, PilotRun, RunError, RunEvent, VerificationReport } from "@/lib/pilot-types";
-import { readSettings } from "@/lib/settings-client";
+import {
+  readSettings,
+  writeSettings,
+  OPENAI_HIGH_VOLUME_MODELS,
+  OPENAI_STANDARD_MODELS,
+  type AllowedOpenAIModel,
+  type EngineSettings,
+} from "@/lib/settings-client";
 
 const examples = [
   { label: "clsx #100", url: "https://github.com/lukeed/clsx/issues/100" },
-  { label: "uuid #97", url: "https://github.com/google/uuid/issues/97" },
+  { label: "uuid #97", url: "https://github.com/uuidjs/uuid/issues/97" },
   { label: "clsx #112", url: "https://github.com/lukeed/clsx/issues/112" },
 ];
 
@@ -281,17 +288,27 @@ export default function Home() {
   const [prError, setPrError] = useState<RunError | null>(null);
   const [prProgress, setPrProgress] = useState<string[]>([]);
   const [restoredAt, setRestoredAt] = useState<string | null>(null);
+  const [engineSettings, setEngineSettings] = useState<EngineSettings | null>(null);
   const [engineLabel, setEngineLabel] = useState("Local Codex CLI");
 
   const hostedPreview = useSyncExternalStore(subscribeToLocation, hostedPreviewFromLocation, () => configuredHostedPreview);
   const active = (run || sample) as PilotRun;
   const activeStage = active.stages.find((stage) => stage.status === "active");
 
+  function handleModelChange(nextModel: AllowedOpenAIModel) {
+    const current = engineSettings || readSettings();
+    const updated: EngineSettings = { ...current, openaiModel: nextModel, provider: "openai" };
+    writeSettings(updated);
+    setEngineSettings(updated);
+    setEngineLabel(`OpenAI API (${nextModel})`);
+  }
+
   // Restore the last finished run + engine label once on mount
   // (effect-only: no SSR/localStorage mismatch).
   /* eslint-disable react-hooks/set-state-in-effect -- mount-only restore from external localStorage snapshot */
   useEffect(() => {
     const engine = readSettings();
+    setEngineSettings(engine);
     setEngineLabel(engine.provider === "openai" ? `OpenAI API (${engine.openaiModel})` : "Local Codex CLI");
     const saved = readSavedRun();
     if (saved) {
@@ -822,9 +839,34 @@ export default function Home() {
             <Link href="/logs" className="rounded-md border border-[#30363d] px-2.5 py-1.5 text-[#c9d1d9] hover:bg-[#21262d]">
               Logs
             </Link>
-            <span className="hidden font-mono text-[11px] text-[#6e7681] md:block" title="Engine powering investigations">
-              {engineLabel}
-            </span>
+            {engineSettings?.provider === "openai" ? (
+              <select
+                aria-label="Select OpenAI model"
+                value={engineSettings.openaiModel}
+                onChange={(e) => handleModelChange(e.target.value as AllowedOpenAIModel)}
+                className="hidden md:block rounded border border-[#30363d] bg-[#0d1117] px-2 py-1 font-mono text-[11px] text-[#58a6ff] outline-none hover:border-[#58a6ff] cursor-pointer"
+                title="Model chosen from eligible free daily usage allowance"
+              >
+                <optgroup label="High volume tier (up to 2.5M tokens/day)">
+                  {OPENAI_HIGH_VOLUME_MODELS.map((m) => (
+                    <option key={m} value={m} className="bg-[#161b22] text-white">
+                      {m}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Standard tier (up to 250K tokens/day)">
+                  {OPENAI_STANDARD_MODELS.map((m) => (
+                    <option key={m} value={m} className="bg-[#161b22] text-white">
+                      {m}
+                    </option>
+                  ))}
+                </optgroup>
+              </select>
+            ) : (
+              <span className="hidden font-mono text-[11px] text-[#6e7681] md:block" title="Engine powering investigations">
+                {engineLabel}
+              </span>
+            )}
             <span className={(loading || verifying ? "animate-pulse bg-[#58a6ff]" : "bg-[#3fb950]") + " h-2 w-2 rounded-full"} />
             {loading ? activeStage?.label || "Starting" : verifying ? "Verifying patch…" : hostedPreview ? "Hosted sample" : "Local agent ready"}
             {restoredAt && !loading && (

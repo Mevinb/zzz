@@ -119,5 +119,99 @@ function assertNoLeak(value) {
   }
   console.log('PASS missing key fails before fetching');
 
+  // 7. Allowed models check: exactly the 17 specified models
+  {
+    const expected = [
+      'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5-mini', 'gpt-5-nano',
+      'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o-mini', 'o3-mini', 'o4-mini',
+      'gpt-5.4', 'gpt-5.2', 'gpt-5.1', 'gpt-5', 'gpt-4.1', 'gpt-4o', 'o1', 'o3'
+    ];
+    assert.equal(provider.ALLOWED_OPENAI_MODELS.length, 17);
+    for (const m of expected) {
+      assert.ok(provider.isAllowedOpenAIModel(m), `model ${m} must be allowed`);
+      assert.equal(provider.resolveAllowedModel(m), m);
+    }
+    assert.equal(provider.isAllowedOpenAIModel('gpt-3.5-turbo'), false);
+    assert.equal(provider.resolveAllowedModel('invalid-model'), provider.OPENAI_DEFAULT_MODEL);
+  }
+  console.log('PASS allowed models strictly constrained to user list');
+
+  // 8. Robust JSON extraction and schema repair
+  {
+    const investigation = load('investigation');
+    // Markdown code block extraction
+    const fenced = '```json\n{"test": true}\n```';
+    assert.equal(investigation.cleanAndExtractJson(fenced), '{"test": true}');
+    // Preamble extraction
+    const preamble = 'Here is your output:\n{"test": true}\nDone!';
+    assert.equal(investigation.cleanAndExtractJson(preamble), '{"test": true}');
+    // Array clamping and object cleanup
+    const testSchema = {
+      type: 'object',
+      additionalProperties: false,
+      required: ['items', 'name', 'count'],
+      properties: {
+        items: { type: 'array', maxItems: 2, items: { type: 'string' } },
+        name: { type: 'string' },
+        count: { type: 'number', minimum: 0, maximum: 1 },
+      },
+    };
+    const dirty = {
+      items: ['a', 'b', 'c', 'd'],
+      name: 123,
+      count: 75,
+      extraKey: 'forbidden',
+    };
+    const repaired = investigation.repairAgainstSchema(dirty, testSchema);
+    assert.deepEqual(repaired.items, ['a', 'b']);
+    assert.equal(repaired.name, '123');
+    assert.equal(repaired.count, 0.75);
+    assert.equal('extraKey' in repaired, false);
+    // Trailing commas and comments extraction
+    const jsonWithComments = '{\n  // Single line comment\n  /* Block comment */\n  "items": ["x", "y",],\n  "name": "valid",\n  "count": 0.5,\n}';
+    const cleaned = investigation.cleanAndExtractJson(jsonWithComments);
+    assert.doesNotThrow(() => JSON.parse(cleaned));
+    const parsedObj = JSON.parse(cleaned);
+    assert.equal(parsedObj.name, 'valid');
+    assert.deepEqual(parsedObj.items, ['x', 'y']);
+
+    // Enum repair fallback
+    const enumSchema = { type: 'object', additionalProperties: false, required: ['role'], properties: { role: { type: 'string', enum: ['source', 'test', 'docs'] } } };
+    const invalidEnum = { role: 'unrecognized_role' };
+    const repairedEnum = investigation.repairAgainstSchema(invalidEnum, enumSchema);
+    assert.equal(repairedEnum.role, 'source');
+    assert.ok(investigation.conforms(repairedEnum, enumSchema));
+  }
+  console.log('PASS robust JSON extraction and schema repair succeed');
+
+  // 9. Retry backoff for 429 and 5xx transient errors
+  {
+    let attempts = 0;
+    const retryFetch = async (url, init) => {
+      attempts++;
+      if (attempts === 1) {
+        return {
+          status: 429,
+          ok: false,
+          headers: new Headers({ 'Retry-After': '0' }),
+          json: async () => ({ error: { message: 'rate limit' } }),
+        };
+      }
+      return {
+        status: 200,
+        ok: true,
+        headers: new Headers(),
+        json: async () => okResponse('{"recovered": true}'),
+      };
+    };
+    const run = provider.createOpenAIRunner({ apiKey: KEY, fetchImpl: retryFetch });
+    const text = await run('ping');
+    assert.equal(text, '{"recovered": true}');
+    assert.equal(attempts, 2);
+  }
+  console.log('PASS retry backoff recovers from transient 429/5xx errors');
+
   console.log('PASS openai provider is strict-safe and redacted');
 })().catch((error) => { console.error(error); process.exit(1); });
+
+

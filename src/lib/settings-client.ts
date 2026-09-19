@@ -8,11 +8,45 @@ export type EngineSettings = {
   openaiModel: string;
 };
 
+export const OPENAI_HIGH_VOLUME_MODELS = [
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "gpt-5-mini",
+  "gpt-5-nano",
+  "gpt-4.1-mini",
+  "gpt-4.1-nano",
+  "gpt-4o-mini",
+  "o3-mini",
+  "o4-mini",
+] as const;
+
+export const OPENAI_STANDARD_MODELS = [
+  "gpt-5.4",
+  "gpt-5.2",
+  "gpt-5.1",
+  "gpt-5",
+  "gpt-4.1",
+  "gpt-4o",
+  "o1",
+  "o3",
+] as const;
+
+export const ALLOWED_OPENAI_MODELS = [
+  ...OPENAI_HIGH_VOLUME_MODELS,
+  ...OPENAI_STANDARD_MODELS,
+] as const;
+
+export type AllowedOpenAIModel = (typeof ALLOWED_OPENAI_MODELS)[number];
+
 export const SETTINGS_KEY = "codex-pilot:settings:v1";
-export const DEFAULT_OPENAI_MODEL = "gpt-5";
+export const DEFAULT_OPENAI_MODEL: AllowedOpenAIModel = "gpt-5-mini";
+
+export function isAllowedOpenAIModel(model: string): model is AllowedOpenAIModel {
+  return (ALLOWED_OPENAI_MODELS as readonly string[]).includes(model);
+}
 
 export const DEFAULT_SETTINGS: EngineSettings = {
-  provider: "local",
+  provider: "openai",
   openaiApiKey: "",
   openaiModel: DEFAULT_OPENAI_MODEL,
 };
@@ -23,10 +57,13 @@ export function readSettings(): EngineSettings {
     const raw = window.localStorage.getItem(SETTINGS_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<EngineSettings>;
+    const model = typeof parsed.openaiModel === "string" && isAllowedOpenAIModel(parsed.openaiModel.trim())
+      ? (parsed.openaiModel.trim() as AllowedOpenAIModel)
+      : DEFAULT_OPENAI_MODEL;
     return {
-      provider: parsed.provider === "openai" ? "openai" : "local",
+      provider: parsed.provider === "local" ? "local" : "openai",
       openaiApiKey: typeof parsed.openaiApiKey === "string" ? parsed.openaiApiKey : "",
-      openaiModel: typeof parsed.openaiModel === "string" && parsed.openaiModel.trim() ? parsed.openaiModel.trim() : DEFAULT_OPENAI_MODEL,
+      openaiModel: model,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
