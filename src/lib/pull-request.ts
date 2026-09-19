@@ -415,7 +415,6 @@ export async function openPullRequest(
       await git(["checkout", "-b", branch], repoDir, { timeoutMs: 15_000 });
       await git(["apply", "--check", "--whitespace=fix", patchPath], repoDir, { timeoutMs: 15_000 });
       await git(["apply", "--whitespace=fix", "--index", patchPath], repoDir, { timeoutMs: 15_000 });
-      await git(["diff", "--cached", "--check", "--whitespace=fix"], repoDir, { timeoutMs: 15_000 });
     } catch (error) {
       const detail = redactSecrets(error instanceof Error ? error.message : String(error), secrets).slice(0, 1000);
       stage("apply", "Applying patch", "failed", detail);
