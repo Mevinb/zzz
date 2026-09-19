@@ -13,6 +13,7 @@
     "test:logs": "node scripts/test-logs.cjs",
     "test:pr": "node scripts/test-pr-flow.cjs",
     "test:browser": "playwright test",
+    "test:smoke": "node scripts/smoke-hosted.cjs",
     "benchmark": "node scripts/benchmark-pilot.cjs"
   },
   "dependencies": {

@@ -332,6 +332,11 @@ export default function Home() {
     setRestoredAt(null);
     setFileIndex(0);
     setTab("diff");
+    setSelectedVersion(undefined);
+    setExpanded(null);
+    setPrConsent(false);
+    setPrError(null);
+    setPrProgress([]);
   }
 
   useEffect(() => {
