@@ -52,7 +52,7 @@ type SearchResponse = { items?: SearchItem[] };
 type ExplorerResponse = { missingEvidence: MissingEvidence[]; requiredCapability: "none" | "runtime" | "credentials" | "hardware" | "external_services" | "private_infrastructure"; decision?: "continue" | "ready_to_patch" | "out_of_scope"; confidence?: number; reason?: string; searchQueries?: string[]; filesToInspect?: string[]; repeatJustifications?: { target?: string; reason?: string }[]; evidence?: { path?: string; relevance?: string; findings?: string[] }[] };
 type PlannerResponse = { goal: string; steps: { file: string; operation: "create" | "modify" | "delete"; action: string; reason: string; requirementsCovered?: string[] }[]; filesAllowedToChange: string[] };
 type CoderResponse = { changes: { path: string; operation: "create" | "modify" | "delete"; updatedContent: string; explanation: string; role: FileRole; requirementsCovered: string[] }[] };
-type ReviewerResponse = { requirementsCovered?: boolean; unrelatedChanges?: boolean; likelySyntaxRisk?: boolean; missingRequirements: string[]; apiBreakageRisk?: boolean; evidenceSupported?: boolean; verdict?: "approve" | "revise" | "refuse"; feedback?: string[]; requirementCoverage?: Record<string, "pass" | "fail"> };
+type ReviewerResponse = { requirementsCovered?: boolean; unrelatedChanges?: boolean; likelySyntaxRisk?: boolean; missingRequirements: string[]; apiBreakageRisk?: boolean; evidenceSupported?: boolean; verdict?: "approve" | "revise" | "refuse"; feedback?: string[]; requirementCoverage?: { id: string; verdict: string }[] };
 type GithubClient = <T>(path: string, raw?: boolean) => Promise<T>;
 type CodexRunner = (prompt: string, schema?: object) => Promise<string>;
 
@@ -199,7 +199,7 @@ export const plannerSchema = { type: "object", additionalProperties: false, requ
 // writing call with invalid_json_schema — keep this invariant (see schema audit test).
 export const coderSchema = { type: "object", additionalProperties: false, required: ["changes"], properties: { changes: { type: "array", minItems: 1, maxItems: MAX_CHANGED_FILES, items: { type: "object", additionalProperties: false, required: ["path", "updatedContent", "explanation", "operation", "role", "requirementsCovered"], properties: { path: { type: "string" }, operation: { type: "string", enum: ["create", "modify", "delete"] }, updatedContent: { type: "string", maxLength: MAX_FILE_BYTES }, explanation: { type: "string", minLength: 1 }, role: { type: "string", enum: ["source", "test", "docs", "config", "types", "generated"] }, requirementsCovered: { type: "array", minItems: 1, items: { type: "string" } } } } } } };
 
-export const reviewSchema = { type: "object", additionalProperties: false, required: ["missingRequirements", "requirementsCovered", "unrelatedChanges", "likelySyntaxRisk", "apiBreakageRisk", "evidenceSupported", "verdict", "feedback", "requirementCoverage"], properties: { missingRequirements: { type: "array", maxItems: 8, items: { type: "string" } }, requirementsCovered: { type: "boolean" }, unrelatedChanges: { type: "boolean" }, likelySyntaxRisk: { type: "boolean" }, apiBreakageRisk: { type: "boolean" }, evidenceSupported: { type: "boolean" }, verdict: { type: "string", enum: ["approve", "revise", "refuse"] }, feedback: { type: "array", maxItems: 4, items: { type: "string" } }, requirementCoverage: { type: "object", additionalProperties: { type: "string" } } } } as const;
+export const reviewSchema = { type: "object", additionalProperties: false, required: ["missingRequirements", "requirementsCovered", "unrelatedChanges", "likelySyntaxRisk", "apiBreakageRisk", "evidenceSupported", "verdict", "feedback", "requirementCoverage"], properties: { missingRequirements: { type: "array", maxItems: 8, items: { type: "string" } }, requirementsCovered: { type: "boolean" }, unrelatedChanges: { type: "boolean" }, likelySyntaxRisk: { type: "boolean" }, apiBreakageRisk: { type: "boolean" }, evidenceSupported: { type: "boolean" }, verdict: { type: "string", enum: ["approve", "revise", "refuse"] }, feedback: { type: "array", maxItems: 4, items: { type: "string" } }, requirementCoverage: { type: "array", maxItems: 12, items: { type: "object", additionalProperties: false, required: ["id", "verdict"], properties: { id: { type: "string" }, verdict: { type: "string" } } } } } } as const;
 
 async function runCodex(prompt: string, schema?: object) {
   const folder = await mkdtemp(join(tmpdir(), "codex-pilot-")); const output = join(folder, "answer.json"); const schemaPath = join(folder, "response-schema.json");
@@ -705,13 +705,17 @@ function validatePatchStatic(files: FileChange[], state: AgentRunState): StaticC
 async function reviewPatch(state: AgentRunState, codex: CodexRunner, tools: ReturnType<typeof emitters>, emit: (event: RunEvent) => void) {
   tools.stage("reviewing", "investigating");
   const instructions =
-    "You are the patch reviewer for Codex Pilot. Judge only the supplied issue, requirements contract, evidence package, plan, original changed files, and generated patch. Verify each requirement individually. Return requirementCoverage mapping each requirement ID to 'pass' or 'fail - explanation'. Approve only if all requirements pass, no unrelated changes are present, syntax/API risk appears low, and evidence supports the patch. Return revise for one specific fixable concern, otherwise refuse. Include missingRequirements explicitly. Never claim execution or tests.";
+    "You are the patch reviewer for Codex Pilot. Judge only the supplied issue, requirements contract, evidence package, plan, original changed files, and generated patch. Verify each requirement individually. Return requirementCoverage as a list of {id, verdict} entries, one per requirement ID, with verdict 'pass' or 'fail - explanation'. Approve only if all requirements pass, no unrelated changes are present, syntax/API risk appears low, and evidence supports the patch. Return revise for one specific fixable concern, otherwise refuse. Include missingRequirements explicitly. Never claim execution or tests.";
 
   const input = `${compactIssue(state)}\n\nREQUIREMENTS CONTRACT\n${state.requirements.map((r) => `[${r.id}] (${r.type}) ${r.text}`).join("\n")}\n\nEVIDENCE PACKAGE\n${evidenceSummary(state.evidence)}\n\nPLAN\n${state.plan.map((step) => `${step.title}: ${step.detail}`).join("\n")}\n\nORIGINAL CHANGED FILES\n${[...state.originals].filter(([path]) => state.files.some((file) => file.path === path)).map(([path, content]) => `--- ${path}\n${content}`).join("\n\n")}\n\nPATCH\n${state.files.map((file) => file.diff).join("\n")}`;
 
   const result = await responseJson<ReviewerResponse>(codex, instructions, input, reviewSchema, "patch review");
 
-  const cov = result.requirementCoverage || {};
+  // Strict output carries coverage as a list; the stored review record keeps the map form.
+  const cov: Record<string, string> = {};
+  for (const item of result.requirementCoverage ?? []) {
+    if (item && typeof item.id === "string" && typeof item.verdict === "string" && !(item.id in cov)) cov[item.id] = item.verdict;
+  }
   let anyReqFailed = false;
   for (const req of state.requirements) {
     const verdict = cov[req.id];

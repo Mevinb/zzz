@@ -121,3 +121,21 @@ test("a codex failure names the stage, shows the code, and links to logs", async
   await expect(page.getByRole("button", { name: "Retry from scratch" })).toBeVisible();
   await expect(page.getByText("No patch yet — the PR button appears here once a patch is proposed.")).toBeVisible();
 });
+
+test("a finished run survives navigation and reload via local memory", async ({ page }) => {
+  await streamRun(page, completedRun());
+  await page.goto("/");
+  await page.getByLabel("GitHub issue URL").fill("https://github.com/fixture/repo/issues/1");
+  const request = page.waitForRequest("**/api/runs**");
+  await page.getByRole("button", { name: "Run investigation" }).click();
+  await request;
+  await expect(page.getByRole("button", { name: "Patch v2 (Revised)" })).toBeVisible();
+  await page.goto("/logs");
+  await expect(page.getByText("Server logs")).toBeVisible();
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Patch v2 (Revised)" })).toBeVisible();
+  await expect(page.getByText(/Restored /)).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Patch v2 (Revised)" })).toBeVisible();
+  await expect(page.getByText("New file proposal: src/new-validator.ts")).toBeVisible();
+});

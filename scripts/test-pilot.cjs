@@ -127,10 +127,10 @@ async function scenario(name, options = {}) {
       }
       reviews++;
       if (options.firstReviewRefuses) {
-        return JSON.stringify({ verdict: 'refuse', requirementsCovered: false, unrelatedChanges: false, likelySyntaxRisk: false, apiBreakageRisk: false, evidenceSupported: true, missingRequirements: ['Empty strings must be rejected'], feedback: ['Direct refusal on first review'], requirementCoverage: { R1: 'fail', R2: 'pass', R3: 'pass' } });
+        return JSON.stringify({ verdict: 'refuse', requirementsCovered: false, unrelatedChanges: false, likelySyntaxRisk: false, apiBreakageRisk: false, evidenceSupported: true, missingRequirements: ['Empty strings must be rejected'], feedback: ['Direct refusal on first review'], requirementCoverage: [{ id: 'R1', verdict: 'fail' }, { id: 'R2', verdict: 'pass' }, { id: 'R3', verdict: 'pass' }] });
       }
       const revise = (options.revise && reviews === 1) || options.reviewFails;
-      return JSON.stringify({ verdict: revise ? 'revise' : 'approve', requirementsCovered: !revise, unrelatedChanges: false, likelySyntaxRisk: false, apiBreakageRisk: false, evidenceSupported: true, missingRequirements: revise ? ['Empty strings must be rejected'] : [], feedback: revise ? ['Add empty-string validation'] : [], requirementCoverage: revise ? { R1: 'fail', R2: 'pass', R3: 'pass' } : { R1: 'pass', R2: 'pass', R3: 'pass' } });
+      return JSON.stringify({ verdict: revise ? 'revise' : 'approve', requirementsCovered: !revise, unrelatedChanges: false, likelySyntaxRisk: false, apiBreakageRisk: false, evidenceSupported: true, missingRequirements: revise ? ['Empty strings must be rejected'] : [], feedback: revise ? ['Add empty-string validation'] : [], requirementCoverage: (revise ? [['R1', 'fail']] : [['R1', 'pass']]).concat([['R2', 'pass'], ['R3', 'pass']]).map(([id, verdict]) => ({ id, verdict })) });
     },
   });
   const terminal = events.at(-1);

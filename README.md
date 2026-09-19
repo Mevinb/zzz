@@ -38,6 +38,8 @@ Open `/logs` (or the **Logs** button in the header) to watch server activity and
 
 If a run fails, the banner names the failed stage (e.g. "Failed at: Generating patch") with an error code and a **View logs** link. Codex step failures distinguish timeouts (`CODEX_TIMEOUT`, 180s per step), crashes (`CODEX_EXIT`, exit code + last output), and auth problems (`CODEX_UNAVAILABLE`). Retry always restarts from scratch. The agent activity panel collapses completed stages — expand one to see its steps.
 
+Finished runs are auto-saved to the browser (`localStorage`) and restored when you navigate between the main page and `/logs` or reload — look for the "Restored …" chip in the header, with a **Clear** button to drop it. In-progress runs can't be resumed after leaving the page.
+
 The deterministic regression suite covers explicit requirement-to-plan-to-patch coverage, stable revision pinning, planner repair, patch persistence, bounded revisions, and manual-QA-only verification behavior.
 
 If Codex cannot return a supported, confident edit, the app clearly refuses to offer an empty patch. GitHub rate limits, private or missing repositories, closed issues, unsupported files, and large repositories receive dedicated failure states.

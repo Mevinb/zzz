@@ -14,6 +14,29 @@ const configuredHostedPreview = process.env.NEXT_PUBLIC_CODEX_PILOT_LIVE_RUNS ==
 const subscribeToLocation = () => () => {};
 const hostedPreviewFromLocation = () => configuredHostedPreview || window.location.hostname.endsWith(".vercel.app");
 
+// Local memory: the last finished run survives navigation (e.g. main <-> logs)
+// and full page reloads. Live (in-progress) runs are not resumable — the SSE
+// stream dies with the page — so only terminal runs are stored.
+const LAST_RUN_KEY = "codex-pilot:last-run:v1";
+type SavedRun = { run: Partial<PilotRun>; error: RunError | null; failedStage: string | null; savedAt: string };
+function slimRunForStorage(run: Partial<PilotRun>): Partial<PilotRun> {
+  // Full file contents can blow the ~5MB localStorage quota; diffs carry the reviewable content.
+  if (!run.files) return run;
+  return { ...run, files: run.files.map((file) => ({ ...file, originalContent: null, updatedContent: null })) };
+}
+function readSavedRun(): SavedRun | null {
+  try {
+    if (typeof window === "undefined") return null;
+    const raw = window.localStorage.getItem(LAST_RUN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SavedRun;
+    if (!parsed || typeof parsed !== "object" || !parsed.run || typeof parsed.run.issue?.number !== "number" || !Array.isArray(parsed.run.stages)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 const sample: PilotRun = {
   issue: { number: 123, title: "Dark mode resets after page refresh", repository: "acme/astro-ui", url: "https://github.com/acme/astro-ui/issues/123" },
   repository: { branch: "main", language: "TypeScript", public: true, url: "https://github.com/acme/astro-ui" },
@@ -256,10 +279,60 @@ export default function Home() {
   const [prCreating, setPrCreating] = useState(false);
   const [prError, setPrError] = useState<RunError | null>(null);
   const [prProgress, setPrProgress] = useState<string[]>([]);
+  const [restoredAt, setRestoredAt] = useState<string | null>(null);
 
   const hostedPreview = useSyncExternalStore(subscribeToLocation, hostedPreviewFromLocation, () => configuredHostedPreview);
   const active = (run || sample) as PilotRun;
   const activeStage = active.stages.find((stage) => stage.status === "active");
+
+  // Restore the last finished run once on mount (effect-only: no SSR/localStorage mismatch).
+  /* eslint-disable react-hooks/set-state-in-effect -- mount-only restore from external localStorage snapshot */
+  useEffect(() => {
+    const saved = readSavedRun();
+    if (saved) {
+      setRun(saved.run);
+      setError(saved.error);
+      setFailedStage(saved.failedStage);
+      try {
+        setRestoredAt(new Date(saved.savedAt).toLocaleString());
+      } catch {
+        setRestoredAt(saved.savedAt);
+      }
+    }
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Persist finished runs; in-progress runs are skipped (not resumable).
+  useEffect(() => {
+    try {
+      if (typeof window === "undefined" || !run) return;
+      if (run.stages?.some((stage) => stage.status === "active")) return;
+      window.localStorage.setItem(
+        LAST_RUN_KEY,
+        JSON.stringify({ run: slimRunForStorage(run), error, failedStage, savedAt: new Date().toISOString() })
+      );
+    } catch {
+      try {
+        window.localStorage.removeItem(LAST_RUN_KEY);
+      } catch {
+        // Storage unavailable — the app works fine without local memory.
+      }
+    }
+  }, [run, error, failedStage]);
+
+  function clearSavedRun() {
+    try {
+      window.localStorage.removeItem(LAST_RUN_KEY);
+    } catch {
+      // Ignore storage errors.
+    }
+    setRun(null);
+    setError(null);
+    setFailedStage(null);
+    setRestoredAt(null);
+    setFileIndex(0);
+    setTab("diff");
+  }
 
   useEffect(() => {
     document.title = loading
@@ -317,6 +390,7 @@ export default function Home() {
     const issueUrl = supplied || url;
     setError(null);
     setFailedStage(null);
+    setRestoredAt(null);
     setFileIndex(0);
     setSelectedVersion(undefined);
     setExpanded(null);
@@ -725,6 +799,14 @@ export default function Home() {
             </Link>
             <span className={(loading || verifying ? "animate-pulse bg-[#58a6ff]" : "bg-[#3fb950]") + " h-2 w-2 rounded-full"} />
             {loading ? activeStage?.label || "Starting" : verifying ? "Verifying patch…" : hostedPreview ? "Hosted sample" : "Local agent ready"}
+            {restoredAt && !loading && (
+              <>
+                <span className="text-[#6e7681]">· Restored {restoredAt}</span>
+                <button onClick={clearSavedRun} className="text-[#58a6ff] hover:underline">
+                  Clear
+                </button>
+              </>
+            )}
           </div>
         </div>
       </header>
