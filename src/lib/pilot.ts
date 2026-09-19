@@ -412,11 +412,63 @@ async function exploreRepository(state: AgentRunState, encoded: string, client: 
 }
 
 
+const IMPL_ROLES = ["source", "config", "types"];
+
+/** Implementation files near mis-targeted test files (same dir or same stem), not yet inspected. */
+export function findUninspectedImplCandidates(testFiles: string[], manifestPaths: string[], inspected: Set<string> | string[]): string[] {
+  const seen = inspected instanceof Set ? inspected : new Set(inspected);
+  const core = (path: string) => {
+    const base = path.split("/").pop() ?? "";
+    return base.replace(/\.[^.]+$/, "").replace(/^(test_|tests_|spec_)/, "").replace(/(_test|_spec|-test|-spec)$/, "");
+  };
+  const dirs = new Set(testFiles.map((file) => file.split("/").slice(0, -1).join("/")));
+  const stems = new Set(testFiles.map(core).filter((stem) => stem.length >= 3));
+  const out: string[] = [];
+  for (const path of manifestPaths) {
+    if (out.length >= MAX_FILES_PER_ROUND) break;
+    if (seen.has(path)) continue;
+    if (!IMPL_ROLES.includes(classifyFileRole(path))) continue;
+    const dir = path.split("/").slice(0, -1).join("/");
+    const stem = core(path);
+    if (dirs.has(dir) || (stem && stems.has(stem)) || [...stems].some((s) => stem.length >= 3 && (stem.includes(s) || s.includes(stem)))) out.push(path);
+  }
+  return out;
+}
+
+/**
+ * Recovery when the planner aims implementation requirements at test/docs files:
+ * point the retry at inspected implementation files, or name uninspected ones
+ * to go read first. Returns nulls when mapping is already correct.
+ */
+export function planImplRecovery(
+  steps: { file: string; requirementsCovered?: string[] }[],
+  requirements: { id: string; type: string }[],
+  inspectedPaths: string[],
+  manifestPaths: string[]
+): { directive: string | null; backroute: string[] } {
+  const none = { directive: null, backroute: [] as string[] };
+  const implIds = new Set(requirements.filter((r) => r.type === "mustImplement").map((r) => r.id));
+  if (!implIds.size) return none;
+  const implSteps = steps.filter((step) => (step.requirementsCovered ?? []).some((id) => implIds.has(id)));
+  if (!implSteps.length) return none;
+  if (implSteps.some((step) => IMPL_ROLES.includes(classifyFileRole(step.file)))) return none;
+  const ids = [...new Set(implSteps.flatMap((step) => step.requirementsCovered ?? []).filter((id) => implIds.has(id)))];
+  const candidates = inspectedPaths.filter((path) => IMPL_ROLES.includes(classifyFileRole(path))).slice(0, 5);
+  if (candidates.length) {
+    return {
+      directive: `REPLAN_DIRECTIVE: Map implementation requirement(s) ${ids.join(", ")} to one of these inspected implementation files: ${candidates.join(", ")}. Do not map implementation requirements to test or docs files.`,
+      backroute: [],
+    };
+  }
+  return { directive: null, backroute: findUninspectedImplCandidates(implSteps.map((s) => s.file), manifestPaths, inspectedPaths) };
+}
+
 async function createPlan(state: AgentRunState, encoded: string, client: GithubClient, codex: CodexRunner, tools: ReturnType<typeof emitters>, emit: (event: RunEvent) => void) {
   tools.stage("planning", "investigating");
   let errors: string[] = [];
   let previousPlan: PlannerResponse | undefined;
   let routedBack = false;
+  let routedBackForImpl = false;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const input = {
@@ -451,7 +503,8 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
     ];
 
     const hasImplementationStep = steps.some((step) => ["source", "config", "types"].includes(classifyFileRole(step.file)));
-    if (isImplementationIssue(state.analysis) && !hasImplementationStep) {
+    const needsImplStep = isImplementationIssue(state.analysis) && !hasImplementationStep;
+    if (needsImplStep) {
       errors.push("SOURCE_CHANGE_REQUIRED: Implementation issue requires at least one production implementation, config, or declaration change, but the plan only targets tests or docs.");
     }
 
@@ -470,6 +523,31 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
         previousPlan = undefined;
         errors = [];
         continue;
+      }
+
+      // Test-only plans get the same recovery: name inspected implementation
+      // files for the retry, or go inspect some first.
+      if (needsImplStep && !routedBackForImpl) {
+        const structuralRecovery = planImplRecovery(
+          steps.map((step) => ({ file: step.file, requirementsCovered: step.requirementsCovered })),
+          state.requirements.map((requirement) => ({ id: requirement.id, type: requirement.type })),
+          [...state.originals.keys()],
+          state.manifest.map((file) => file.path)
+        );
+        if (structuralRecovery.directive) {
+          errors.push(structuralRecovery.directive);
+        } else if (structuralRecovery.backroute.length > 0 && state.inspectedFiles.length < MAX_FILES_INSPECTED) {
+          routedBackForImpl = true;
+          tools.activity("planning", "Back-routing to exploration", `Implementation requirements need production code: inspecting ${structuralRecovery.backroute.join(", ")}.`);
+          tools.stage("exploring", "investigating");
+          await inspectFiles(state, structuralRecovery.backroute, encoded, client, tools, emit);
+          tools.stage("exploring", "completed");
+          tools.stage("planning", "investigating");
+          attempt = -1;
+          previousPlan = undefined;
+          errors = [];
+          continue;
+        }
       }
 
       previousPlan = result;
@@ -495,7 +573,28 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
     for (const requirement of state.requirements.filter((item) => item.type !== "optionalDocs")) {
       if (!mappedReqIds.has(requirement.id)) errors.push(`PLAN_REQUIREMENT_UNMAPPED: ${requirement.id} has no explicit compatible plan step.`);
     }
+    // Recovery when implementation requirements land on test/docs files: aim the
+    // retry at inspected implementation files, or go inspect some first.
+    const implRecovery = planImplRecovery(
+      steps.map((step) => ({ file: step.file, requirementsCovered: step.requirementsCovered })),
+      state.requirements.map((requirement) => ({ id: requirement.id, type: requirement.type })),
+      [...state.originals.keys()],
+      state.manifest.map((file) => file.path)
+    );
+    if (implRecovery.directive) errors.push(implRecovery.directive);
     if (errors.length) {
+      if (implRecovery.backroute.length > 0 && !routedBackForImpl && state.inspectedFiles.length < MAX_FILES_INSPECTED) {
+        routedBackForImpl = true;
+        tools.activity("planning", "Back-routing to exploration", `Implementation requirements need production code: inspecting ${implRecovery.backroute.join(", ")}.`);
+        tools.stage("exploring", "investigating");
+        await inspectFiles(state, implRecovery.backroute, encoded, client, tools, emit);
+        tools.stage("exploring", "completed");
+        tools.stage("planning", "investigating");
+        attempt = -1;
+        previousPlan = undefined;
+        errors = [];
+        continue;
+      }
       previousPlan = result;
       tools.activity("planning", attempt === 0 ? "Repairing plan mapping" : "Plan mapping failed", errors.join("; "), "warning");
       continue;
@@ -523,7 +622,8 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
     tools.stage("planning", "completed");
     return;
   }
-  fail("PLAN_SCOPE_INVALID", "Planning stopped", errors.join("; "), true);
+  const userErrors = errors.filter((error) => !error.startsWith("REPLAN_DIRECTIVE"));
+  fail("PLAN_SCOPE_INVALID", "Planning stopped", (userErrors.length ? userErrors : errors).join("; "), true);
 }
 
 async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: ReturnType<typeof emitters>, emit: (event: RunEvent) => void, feedback?: string) {
@@ -1072,7 +1172,11 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
               title: diagnostic.title,
               code: diagnostic.code,
               reason: diagnostic.message,
-              suggestedNextStep: diagnostic.retryable ? "Retry after resolving the reported service or output error." : "Check the issue and repository details.",
+              suggestedNextStep: /must map to implementation|SOURCE_CHANGE_REQUIRED|only targets tests or docs/i.test(diagnostic.message)
+                ? "The planner twice aimed implementation requirements at test files. Retry — each run explores differently — or narrow the issue toward the implementation file."
+                : diagnostic.retryable
+                  ? "Retry after resolving the reported service or output error."
+                  : "Check the issue and repository details.",
               missingEvidence: state.evidence?.missingEvidence,
             }),
           }

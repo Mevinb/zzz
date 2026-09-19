@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const load = require('./load-pilot.cjs');
-const { streamPilotRun, explorerSchema, plannerSchema, coderSchema, reviewSchema } = load('pilot');
+const { streamPilotRun, explorerSchema, plannerSchema, coderSchema, reviewSchema, planImplRecovery, findUninspectedImplCandidates } = load('pilot');
 const { normalizeQuery, candidateScore, relatedPaths, proposedDiff, extractStructuredRequirements, analysisSchema } = load('investigation');
 // Strict structured output rejects any object schema where a properties key is
 // missing from required (once broke every patch-writing call: missing 'role').
@@ -21,6 +21,44 @@ for (const [name, schema] of [['analysis', analysisSchema], ['explorer', explore
   assertStrictSchema(name, schema);
 }
 console.log('PASS agent schemas satisfy strict required-properties invariant');
+// Planner aimed implementation requirements at test files: directive names inspected impl files.
+{
+  const recovery = planImplRecovery(
+    [{ file: 'test/validator.test.ts', requirementsCovered: ['R1', 'R2'] }],
+    [{ id: 'R1', type: 'mustImplement' }, { id: 'R2', type: 'mustPreserve' }],
+    ['src/validator.ts', 'test/validator.test.ts'],
+    ['src/validator.ts', 'test/validator.test.ts']
+  );
+  assert.match(recovery.directive, /REPLAN_DIRECTIVE/);
+  assert.match(recovery.directive, /src\/validator\.ts/);
+  assert.match(recovery.directive, /R1/);
+  assert.deepEqual(recovery.backroute, []);
+}
+// No implementation file inspected: back-route finds the same-stem source file.
+{
+  const recovery = planImplRecovery(
+    [{ file: 'tests/unittests/optimization/test_local_eval_sampler.py', requirementsCovered: ['R1'] }],
+    [{ id: 'R1', type: 'mustImplement' }],
+    ['tests/unittests/optimization/test_local_eval_sampler.py'],
+    ['tests/unittests/optimization/test_local_eval_sampler.py', 'src/google/adk/optimization/local_eval_sampler.py', 'README.md']
+  );
+  assert.equal(recovery.directive, null);
+  assert.ok(recovery.backroute.includes('src/google/adk/optimization/local_eval_sampler.py'));
+  assert.ok(!recovery.backroute.includes('README.md'));
+}
+// Correctly mapped plans need no recovery.
+{
+  const recovery = planImplRecovery(
+    [{ file: 'src/validator.ts', requirementsCovered: ['R1'] }],
+    [{ id: 'R1', type: 'mustImplement' }],
+    ['src/validator.ts'],
+    ['src/validator.ts']
+  );
+  assert.equal(recovery.directive, null);
+  assert.deepEqual(recovery.backroute, []);
+}
+assert.deepEqual(findUninspectedImplCandidates(['test/a.ts'], ['src/a.ts', 'src/a.ts'], ['src/a.ts']), []);
+console.log('PASS mis-aimed implementation plans get a recovery directive or back-route');
 const analysis = { kinds: ['validation'], summary: 'Reject empty names', expectedBehavior: 'Empty names rejected', observedBehavior: 'Empty names accepted', importantSymbols: ['validateName'], importantPaths: ['src/validator.ts'], errorMessages: [], likelyEvidenceSurfaces: ['validator', 'test'], maintainerClarifications: [], reproductionDetails: [], proposedApproaches: [], constraints: [] };
 for (const query of ['index', 'package', 'source', 'the export map and readme', 'Search package.json and build configuration to understand runtime entry points']) assert.equal(normalizeQuery(query), null);
 for (const query of ['clsx/lite', 'moduleResolution', 'typesVersions', 'ClassValue', 'declare namespace clsx']) assert.equal(normalizeQuery(query), query);
@@ -41,7 +79,7 @@ const maintainerRequirement = extractStructuredRequirements({ ...analysis, impor
 assert.ok(maintainerRequirement.some((requirement) => requirement.type === 'mustPreserve'));
 
 async function scenario(name, options = {}) {
-  let gates = 0, reviews = 0, coderCalls = 0, malformed = 0, plans = 0;
+  let gates = 0, reviews = 0, coderCalls = 0, malformed = 0, plans = 0, sawImplDirective = false;
   const files = {
     'src/validator.ts': 'export const validateName = (name: string) => true;\n',
     'test/validator.test.ts': 'import { validateName } from "../src/validator";\n',
@@ -77,6 +115,20 @@ async function scenario(name, options = {}) {
       if (schema.required.includes('goal')) {
         plans++;
         if (options.cumulative) { assert.match(prompt, /Always returns true/); assert.match(prompt, /Referenced rule/); }
+        // Early attempts aim R1 (mustImplement) at the test file while an
+        // implementation step covers R2; the retry must carry REPLAN_DIRECTIVE
+        // naming an inspected implementation file. Match on prompt content
+        // rather than call count (back-routes reset the attempt loop).
+        if (options.repairImplMapping && !prompt.includes('REPLAN_DIRECTIVE')) {
+          return JSON.stringify({ goal: 'Mis-aimed attempt', filesAllowedToChange: ['src/validator.ts', 'test/validator.test.ts'], steps: [
+            { file: 'src/validator.ts', operation: 'modify', action: 'Touch validator', reason: 'Related surface', requirementsCovered: ['R2'] },
+            { file: 'test/validator.test.ts', operation: 'modify', action: 'Cover everything with tests', reason: 'Verify', requirementsCovered: ['R1', 'R3'] },
+          ] });
+        }
+        if (options.repairImplMapping && prompt.includes('REPLAN_DIRECTIVE')) {
+          sawImplDirective = true;
+          assert.match(prompt, /src\/validator\.ts/);
+        }
         const invalid = options.invalidPlan || (options.repairPlan && plans === 1);
         if (options.testOnlyPlan) {
           return JSON.stringify({ goal: 'Test only', filesAllowedToChange: ['test/validator.test.ts'], steps: [{ file: 'test/validator.test.ts', operation: 'modify', action: 'Write tests', reason: 'Verify', requirementsCovered: ['R3'] }] });
@@ -207,6 +259,7 @@ async function scenario(name, options = {}) {
     }
     if (options.budget) { assert.equal(run.refusal.code, 'BUDGET_EXHAUSTED'); assert.doesNotMatch(run.refusal.suggestedNextStep, /runtime/); }
     if (options.revise || options.reviewFails) { assert.equal(reviews, 2); assert.equal(coderCalls, 2); }
+    if (options.repairImplMapping) { assert.ok(sawImplDirective); assert.ok(plans >= 3); }
     if (options.gateRepair) { assert.equal(coderCalls, 2); assert.equal(reviews, 1); }
     if (options.firstReviewRefuses) { assert.equal(reviews, 1); assert.equal(coderCalls, 1); }
     if (options.outOfScope) assert.equal(run.refusal.code, 'OUT_OF_SCOPE_HARDWARE');
@@ -241,6 +294,7 @@ async function scenario(name, options = {}) {
   await scenario('missing required symbol rejected by pre-review static gate', { missingRequiredSymbol: true });
   await scenario('unsolicited docs change rejected by pre-review static gate', { unsolicitedDocs: true });
   await scenario('pre-review static gate triggers repair loop and recovers', { gateRepair: true });
+  await scenario('planner aimed at tests is redirected to implementation files', { repairImplMapping: true });
   process.env.GITHUB_PR_TOKEN = 'sentinel-codex-stderr-9z9z';
   try {
     await scenario('codex failure at writing keeps evidence and names the stage', { codexFailsAtCoder: true });
