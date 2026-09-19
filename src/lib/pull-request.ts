@@ -288,24 +288,38 @@ export async function openPullRequest(
   try {
     if (mode === "fork") {
       stage("fork", "Forking repository", "active");
-      activity("Creating fork", `Forking ${owner}/${repo} for PR head ${branch}.`);
-      const forked = await githubApi<{ full_name?: string; owner?: { login?: string } }>(
-        fetchImpl,
-        `/repos/${owner}/${repo}/forks`,
-        token,
-        { method: "POST", body: {} }
-      );
-      if (forked.status !== 202 && forked.status !== 200 && forked.status !== 201) {
-        const message = redactSecrets(JSON.stringify(forked.data).slice(0, 500) || `status ${forked.status}`, secrets);
-        throw prError("pr_forbidden", "Could not fork repository", `GitHub refused the fork (status ${forked.status}). ${message}`, forked.status >= 500);
-      }
       const me = await githubApi<{ login?: string }>(fetchImpl, "/user", token);
-      forkOwner = forked.data?.owner?.login ?? me.data?.login ?? null;
-      if (!forkOwner) {
-        // Fall back to polling the fork via the authenticated user.
-        forkOwner = me.data?.login ?? null;
+      const login = me.data?.login;
+      if (!login) throw prError("pr_forbidden", "Could not determine fork owner", "GitHub did not return the authenticated user for the fork.", false);
+      // Reuse a fork created earlier (e.g. in the browser): creating a fork via
+      // the API fails for some token types even when reading works fine.
+      const existing = await githubApi<{ full_name?: string; fork?: boolean }>(
+        fetchImpl,
+        `/repos/${login}/${repo}`,
+        token
+      );
+      if (existing.status === 200 && existing.data?.full_name?.toLowerCase() === `${login.toLowerCase()}/${repo.toLowerCase()}`) {
+        forkOwner = login;
+        activity("Reusing existing fork", `Found ${forkOwner}/${repo}; skipping fork creation.`);
+      } else {
+        activity("Creating fork", `Forking ${owner}/${repo} for PR head ${branch}.`);
+        const forked = await githubApi<{ full_name?: string; owner?: { login?: string } }>(
+          fetchImpl,
+          `/repos/${owner}/${repo}/forks`,
+          token,
+          { method: "POST", body: {} }
+        );
+        if (forked.status !== 202 && forked.status !== 200 && forked.status !== 201) {
+          const message = redactSecrets(JSON.stringify(forked.data).slice(0, 500) || `status ${forked.status}`, secrets);
+          throw prError(
+            "pr_forbidden",
+            "Could not fork repository",
+            `GitHub refused to create the fork (status ${forked.status}). ${message} Fine-grained tokens often cannot create forks even when reading works: fork ${owner}/${repo} in your browser (github.com/${owner}/${repo} → Fork) and retry — Codex Pilot will reuse it — or use a classic PAT with the public_repo scope.`,
+            forked.status >= 500
+          );
+        }
+        forkOwner = forked.data?.owner?.login ?? login;
       }
-      if (!forkOwner) throw prError("pr_forbidden", "Could not determine fork owner", "GitHub did not return the authenticated user for the fork.", false);
       cloneUrl = `https://github.com/${forkOwner}/${repo}.git`;
       prHead = `${forkOwner}:${branch}`;
       // Forks need a moment to become cloneable.

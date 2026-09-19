@@ -26,6 +26,7 @@ Open `http://localhost:3000`. Add `GITHUB_TOKEN` to `.env.local` if GitHub’s u
 - The agent may replace content only in a file it inspected. Codex Pilot validates the replacements and generates the diff itself.
 - Target repository code is never executed or tested by Codex Pilot.
 - Pull requests are opt-in: set `CODEX_PILOT_ALLOW_PR=true` and `GITHUB_PR_TOKEN` (Contents + Pull requests write) on the local demo, tick the approval checkbox, and Codex Pilot shallow-clones the repo, applies the reviewed diff on a `codex-pilot/issue-N-*` feature branch, pushes that branch only, and opens a PR. It never pushes to the base branch. Hosted previews always refuse PRs.
+- Fork mode (`CODEX_PILOT_PR_MODE=fork`, for repos you don't own) reuses a fork that already exists under your account — if API fork creation is refused, fork once in the browser and retry. A classic PAT with the `public_repo` scope also sidesteps fine-grained token fork limits.
 
 ## QA status
 

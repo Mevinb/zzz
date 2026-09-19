@@ -260,5 +260,56 @@ function withPrEnv(vars, fn) {
   });
   console.log('PASS missing token fails before cloning');
 
+  // 10. Fork mode reuses a fork created earlier (e.g. in the browser) without POSTing.
+  await withPrEnv({ GITHUB_PR_TOKEN: 'tok', CODEX_PILOT_PR_MODE: 'fork' }, async () => {
+    const seen = [];
+    const inner = mockFetch([
+      ['GET https://api.github.com/user', { status: 200, body: { login: 'mevinb' } }],
+      ['GET https://api.github.com/repos/mevinb/repo', { status: 200, body: { full_name: 'mevinb/repo', fork: true } }],
+      ['POST https://api.github.com/repos/acme/repo/pulls', { status: 201, body: { html_url: 'https://github.com/acme/repo/pull/9', number: 9 } }],
+    ]);
+    const fetchImpl = async (url, init) => { seen.push(`${(init && init.method) || 'GET'} ${url}`); return inner(url, init); };
+    const git = happyGit();
+    const events = [];
+    const result = await pr.openPullRequest(baseInput(), {
+      git,
+      fetchImpl,
+      createWorkspace: async () => '/tmp/ws-forkreuse',
+      removeWorkspace: async () => {},
+      writePatchFile: async () => {},
+      randomSuffix: () => 'fr01',
+    }, (e) => events.push(e));
+    assert.equal(result.forkOwner, 'mevinb');
+    assert.equal(result.prUrl, 'https://github.com/acme/repo/pull/9');
+    assert.ok(!seen.some((k) => k.startsWith('POST https://api.github.com/repos/acme/repo/forks')), 'does not POST a fork when one exists');
+    const cloneCall = git.calls.find((c) => c.args.includes('clone'));
+    assert.ok(cloneCall && cloneCall.args.join(' ').includes('https://github.com/mevinb/repo.git'), 'clones the existing fork');
+    assert.ok(events.some((e) => e.type === 'completed'), 'emits completed');
+  });
+  console.log('PASS fork mode reuses an existing fork');
+
+  // 11. Fork creation refused by GitHub fails with actionable guidance, before cloning.
+  await withPrEnv({ GITHUB_PR_TOKEN: 'tok', CODEX_PILOT_PR_MODE: 'fork' }, async () => {
+    const fetchImpl = mockFetch([
+      ['GET https://api.github.com/user', { status: 200, body: { login: 'mevinb' } }],
+      ['GET https://api.github.com/repos/mevinb/repo', { status: 404, body: { message: 'Not Found' } }],
+      ['POST https://api.github.com/repos/acme/repo/forks', { status: 404, body: { message: 'Not Found', documentation_url: 'https://docs.github.com/rest/repos/forks#create-a-fork', status: '404' } }],
+    ]);
+    const git = happyGit();
+    await assert.rejects(
+      () => pr.openPullRequest(baseInput(), {
+        git,
+        fetchImpl,
+        createWorkspace: async () => '/tmp/ws-forkfail',
+        removeWorkspace: async () => {},
+        writePatchFile: async () => {},
+      randomSuffix: () => 'ff01',
+      }),
+      (err) => err && err.code === 'pr_forbidden' && /browser/i.test(err.message) && /classic/i.test(err.message)
+    );
+    assert.ok(!git.calls.some((c) => c.args.includes('clone')), 'never clones when the fork is refused');
+  });
+  console.log('PASS refused forks explain the browser-fork and classic-PAT fixes');
+
   console.log('PASS pr flow is mocked end-to-end');
 })().catch((error) => { console.error(error); process.exit(1); });
