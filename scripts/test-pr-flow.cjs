@@ -311,5 +311,29 @@ function withPrEnv(vars, fn) {
   });
   console.log('PASS refused forks explain the browser-fork and classic-PAT fixes');
 
+  // 12. Missing repositories (e.g. sample data) fail before any workspace work.
+  await withPrEnv({ GITHUB_PR_TOKEN: 'tok', CODEX_PILOT_PR_MODE: 'fork' }, async () => {
+    let workspaces = 0;
+    let cloned = false;
+    const git = mockGit((args) => { if (args.includes('clone')) cloned = true; return { stdout: '', stderr: '' }; });
+    const fetchImpl = mockFetch([
+      ['GET https://api.github.com/repos/acme/repo', { status: 404, body: { message: 'Not Found' } }],
+    ]);
+    await assert.rejects(
+      () => pr.openPullRequest(baseInput(), {
+        git,
+        fetchImpl,
+        createWorkspace: async () => { workspaces += 1; return '/tmp/ws-missing'; },
+        removeWorkspace: async () => {},
+        writePatchFile: async () => {},
+      randomSuffix: () => 'ms01',
+      }),
+      (err) => err && err.code === 'invalid_target' && /sample data/i.test(err.message)
+    );
+    assert.equal(workspaces, 0);
+    assert.equal(cloned, false);
+  });
+  console.log('PASS missing repositories fail before any workspace work');
+
   console.log('PASS pr flow is mocked end-to-end');
 })().catch((error) => { console.error(error); process.exit(1); });

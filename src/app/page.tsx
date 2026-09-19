@@ -564,6 +564,10 @@ export default function Home() {
   async function startPullRequest() {
     if (prCreating || loading) return;
     setPrError(null);
+    if (active.source === "sample") {
+      setPrError({ code: "sample_run", title: "Sample data cannot be opened as a PR", message: "This is the built-in sample investigation — acme/astro-ui is not a real repository. Run a live investigation on a real public issue first." });
+      return;
+    }
     if (!active.patch || active.files.length === 0) {
       setPrError({ code: "no_patch", title: "No patch to open", message: "Run an investigation first so there is a reviewed diff to turn into a PR." });
       return;
@@ -993,8 +997,17 @@ function PullRequestCard({
 }) {
   const hasPatch = Boolean(run.patch && run.files.length > 0);
   const refused = run.status === "refused";
+  const isSample = run.source === "sample";
   const opened = run.pullRequest?.status === "opened" && run.pullRequest.prUrl;
-  const disabled = creating || hostedPreview || !hasPatch || refused;
+  const disabled = creating || hostedPreview || !hasPatch || refused || isSample;
+  if (isSample && !opened) {
+    return (
+      <div className="mt-5 rounded-md border border-[#30363d] bg-[#161b22] p-4">
+        <p className="font-mono text-[11px] font-medium uppercase tracking-[.14em] text-[#58a6ff]">Pull request</p>
+        <p className="mt-1 text-xs text-[#8b949e]">Sample data — run a live investigation on a real public issue to open a PR.</p>
+      </div>
+    );
+  }
   if (!hasPatch && !opened && !prError && progress.length === 0) {
     return (
       <div className="mt-5 rounded-md border border-[#30363d] bg-[#161b22] p-4">

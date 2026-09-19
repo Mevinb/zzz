@@ -279,6 +279,37 @@ export async function openPullRequest(
   const branch = buildBranchName(input.issue.number, input.commit, suffix);
   const secrets = [token, Buffer.from(`x-access-token:${token}`).toString("base64")];
 
+  // Confirm the repository actually exists before creating workspaces or forks.
+  // A missing repo (e.g. sample data) fails here instead of surfacing as a
+  // confusing fork/push error later. Network errors are ignored so a blip
+  // never blocks a real PR — the clone step will report them clearly.
+  try {
+    const seen = await githubApi<{ private?: boolean; archived?: boolean; disabled?: boolean }>(
+      fetchImpl,
+      `/repos/${owner}/${repo}`,
+      token
+    );
+    if (seen.status === 404) {
+      throw prError(
+        "invalid_target",
+        "Repository not found on GitHub",
+        `No repository ${owner}/${repo} exists — this looks like sample data. Run a live investigation on a real public issue first.`,
+        false
+      );
+    }
+    if (seen.status === 200 && seen.data) {
+      if (seen.data.private) {
+        throw prError("invalid_target", "Private repositories are not supported", "Codex Pilot opens PRs on public repositories only.", false);
+      }
+      if (seen.data.archived || seen.data.disabled) {
+        throw prError("invalid_target", "Repository unavailable", "This repository is archived or disabled.", false);
+      }
+    }
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error) throw error;
+    // Network blip — continue; clone/push will surface real problems.
+  }
+
   const workspace = await createWorkspace();
   const repoDir = join(workspace, "repo");
   let forkOwner: string | null = null;
