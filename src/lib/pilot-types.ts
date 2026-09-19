@@ -33,6 +33,13 @@ export type EvidenceReport = { decision: "continue" | "ready_to_patch" | "out_of
 export type Review = { status: "passed" | "warning"; verdict?: "approved" | "refused"; requirementsCovered?: boolean; unrelatedChanges?: boolean; likelySyntaxProblems?: boolean; apiBreakageRisk?: boolean; evidenceSupported?: boolean; feedback?: string[]; revisionCount?: number; requirementCoverage?: Record<string, "pass" | "fail">; checks: { label: string; status: "passed" | "warning" }[] };
 export type RunError = { code: string; title: string; message: string; retryable?: boolean };
 export type PatchVersion = { version: number; label: string; patch: string; files: FileChange[]; explanations: FileExplanation[]; reviewerFeedback?: string[]; createdMs: number };
+export type PullRequestState = {
+  status: "idle" | "creating" | "opened" | "failed";
+  branch?: string;
+  prUrl?: string;
+  prNumber?: number | null;
+  error?: RunError;
+};
 export type PilotRun = {
   issueAnalysis?: import("./investigation").IssueAnalysis;
   issue: { number: number; title: string; repository: string; url: string };
@@ -60,6 +67,7 @@ export type PilotRun = {
   patchVersions?: PatchVersion[];
   verification?: VerificationReport;
   requirements?: StructuredRequirement[];
+  pullRequest?: PullRequestState;
 };
 export type RunEvent =
   | { type: "context"; issue: PilotRun["issue"]; repository: PilotRun["repository"] }

@@ -20,15 +20,16 @@ Open `http://localhost:3000`. Add `GITHUB_TOKEN` to `.env.local` if GitHub’s u
 
 ## Boundaries
 
-- Public GitHub issues only; pull requests and private repositories are rejected.
+- Public GitHub issues only; pull requests and private repositories are rejected for investigation.
 - Repositories are read through GitHub’s REST API, capped at 25 MB and 10,000 files.
 - The locally authenticated Codex CLI receives only the issue, comments, and selected file contents. It runs in an ephemeral, read-only sandbox with its shell tool disabled.
 - The agent may replace content only in a file it inspected. Codex Pilot validates the replacements and generates the diff itself.
-- Target repositories are never cloned, executed, tested, or modified.
+- Target repository code is never executed or tested by Codex Pilot.
+- Pull requests are opt-in: set `CODEX_PILOT_ALLOW_PR=true` and `GITHUB_PR_TOKEN` (Contents + Pull requests write) on the local demo, tick the approval checkbox, and Codex Pilot shallow-clones the repo, applies the reviewed diff on a `codex-pilot/issue-N-*` feature branch, pushes that branch only, and opens a PR. It never pushes to the base branch. Hosted previews always refuse PRs.
 
 ## QA status
 
-Codex Pilot labels generated changes **PATCH PROPOSED — NOT EXECUTED**. It captures the analyzed commit SHA and preserves the canonical diff and review record; apply the downloaded patch and run repository-defined QA in an approved developer environment.
+Codex Pilot labels generated changes **PATCH PROPOSED — NOT EXECUTED**. It captures the analyzed commit SHA and preserves the canonical diff and review record; download the patch and run repository-defined QA in an approved developer environment, or approve a feature-branch PR and review it on GitHub before merging.
 
 The deterministic regression suite covers explicit requirement-to-plan-to-patch coverage, stable revision pinning, planner repair, patch persistence, bounded revisions, and manual-QA-only verification behavior.
 

@@ -251,6 +251,10 @@ export default function Home() {
   const [error, setError] = useState<RunError | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [how, setHow] = useState(false);
+  const [prConsent, setPrConsent] = useState(false);
+  const [prCreating, setPrCreating] = useState(false);
+  const [prError, setPrError] = useState<RunError | null>(null);
+  const [prProgress, setPrProgress] = useState<string[]>([]);
 
   const hostedPreview = useSyncExternalStore(subscribeToLocation, hostedPreviewFromLocation, () => configuredHostedPreview);
   const active = (run || sample) as PilotRun;
@@ -306,6 +310,11 @@ export default function Home() {
     const issueUrl = supplied || url;
     setError(null);
     setFileIndex(0);
+    setSelectedVersion(undefined);
+    setExpanded(null);
+    setPrError(null);
+    setPrProgress([]);
+    setPrConsent(false);
     if (!issueUrl.trim()) {
       setRun(null);
       setTab("diff");
@@ -334,7 +343,12 @@ export default function Home() {
       const consume = (message: string) => {
         const data = message.split("\n").find((line) => line.startsWith("data: "));
         if (!data) return;
-        const parsed = JSON.parse(data.slice(6)) as RunEvent;
+        let parsed: RunEvent;
+        try {
+          parsed = JSON.parse(data.slice(6)) as RunEvent;
+        } catch {
+          return;
+        }
         if (parsed.type === "completed" || parsed.type === "failed") terminal = true;
         receive(parsed);
       };
@@ -531,6 +545,121 @@ export default function Home() {
     */
   }
 
+  type PullRequestStreamEvent =
+    | { type: "stage"; stage: { id: string; label: string; status: "active" | "complete" | "failed"; detail?: string } }
+    | { type: "activity"; activity: { action: string; detail: string } }
+    | { type: "completed"; result: { branch: string; prUrl: string; prNumber: number | null } }
+    | { type: "failed"; error: RunError };
+
+  async function startPullRequest() {
+    if (prCreating || loading) return;
+    setPrError(null);
+    if (!active.patch || active.files.length === 0) {
+      setPrError({ code: "no_patch", title: "No patch to open", message: "Run an investigation first so there is a reviewed diff to turn into a PR." });
+      return;
+    }
+    if (active.status === "refused") {
+      setPrError({ code: "review_unresolved", title: "Review has unresolved concerns", message: "Resolve the reviewer concerns before opening a PR. Refused runs never open PRs automatically." });
+      return;
+    }
+    if (hostedPreview) {
+      setPrError({
+        code: "hosted_preview",
+        title: "PRs are available locally",
+        message: "This hosted preview cannot clone repositories or open pull requests. Run Codex Pilot locally to open a PR.",
+      });
+      return;
+    }
+    if (!prConsent) {
+      setPrError({
+        code: "consent_required",
+        title: "Approval required",
+        message: "Tick the approval checkbox to allow Codex Pilot to push a feature branch and open a pull request.",
+      });
+      return;
+    }
+    setPrCreating(true);
+    setPrProgress(["Starting PR flow…"]);
+    setRun((prev) => (prev ? { ...prev, pullRequest: { status: "creating" } } : prev));
+    try {
+      const response = await fetch("/api/pull-requests", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repositoryUrl: active.repository.url,
+          branch: active.repository.branch,
+          commit: active.repository.commit,
+          patch: active.patch,
+          issue: active.issue,
+          summary: active.summary,
+          filesChanged: active.files.length,
+          additions: active.metrics.additions,
+          deletions: active.metrics.deletions,
+        }),
+      });
+      if (!response.body) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || "Could not open the PR.");
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let terminal = false;
+      const consume = (message: string) => {
+        const line = message.split("\n").find((l) => l.startsWith("data: "));
+        if (!line) return;
+        let event: PullRequestStreamEvent;
+        try {
+          event = JSON.parse(line.slice(6)) as PullRequestStreamEvent;
+        } catch {
+          return;
+        }
+        if (event.type === "stage") {
+          setPrProgress((prev) => [...prev.slice(-19), `${event.stage.label} — ${event.stage.status}${event.stage.detail ? `: ${event.stage.detail}` : ""}`]);
+        } else if (event.type === "activity") {
+          setPrProgress((prev) => [...prev.slice(-19), `${event.activity.action}: ${event.activity.detail}`]);
+        } else if (event.type === "completed") {
+          terminal = true;
+          setRun((prev) =>
+            prev ? { ...prev, pullRequest: { status: "opened", branch: event.result.branch, prUrl: event.result.prUrl, prNumber: event.result.prNumber } } : prev
+          );
+          setPrProgress((prev) => [...prev, `PR opened: ${event.result.prUrl}`]);
+        } else if (event.type === "failed") {
+          terminal = true;
+          setPrError(event.error);
+          setRun((prev) => (prev ? { ...prev, pullRequest: { status: "failed", error: event.error } } : prev));
+        }
+      };
+      try {
+        for (;;) {
+          const part = await reader.read();
+          buffer += decoder.decode(part.value || new Uint8Array(), { stream: !part.done });
+          const messages = buffer.replace(/\r\n/g, "\n").split("\n\n");
+          buffer = messages.pop() || "";
+          messages.forEach(consume);
+          if (part.done) {
+            if (buffer.trim()) consume(buffer);
+            break;
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      if (!terminal) throw new Error("The PR connection ended before a result arrived. Please retry.");
+    } catch (caught) {
+      const err: RunError = {
+        code: "pr_network_error",
+        title: "PR flow interrupted",
+        message: caught instanceof Error ? caught.message : "Check your connection and try again.",
+        retryable: true,
+      };
+      setPrError(err);
+      setRun((prev) => (prev ? { ...prev, pullRequest: { status: "failed", error: err } } : prev));
+    } finally {
+      setPrCreating(false);
+    }
+  }
+
   const patch = active.patch || active.files.map((file) => file.diff).join("\n");
 
   function download() {
@@ -538,8 +667,10 @@ export default function Home() {
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
     link.download = `issue-${active.issue.number}-proposal.diff`;
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(link.href);
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   }
 
   function copy() {
@@ -579,13 +710,13 @@ export default function Home() {
                 From issue to reviewable patch.
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-[#8b949e]">
-                Codex Pilot selectively explores public repositories, builds a reviewable patch, and records evidence and review findings for developer-side QA.
+                Codex Pilot selectively explores public repositories, builds a reviewable patch, and can open a feature-branch pull request for you to review. It never pushes to the base branch.
               </p>
             </div>
             <div className="flex gap-2 text-xs text-[#8b949e]">
               <span className="rounded-full border border-[#30363d] bg-[#0d1117] px-2.5 py-1">Public issues</span>
               <span className="rounded-full border border-[#30363d] bg-[#0d1117] px-2.5 py-1">No target execution</span>
-              <span className="rounded-full border border-[#30363d] bg-[#0d1117] px-2.5 py-1">No upstream touch</span>
+              <span className="rounded-full border border-[#30363d] bg-[#0d1117] px-2.5 py-1">Opens a PR branch</span>
             </div>
           </div>
 
@@ -656,6 +787,17 @@ export default function Home() {
         )}
 
         <Repo run={active} copy={copy} download={download} openHow={() => setHow(true)} />
+
+        <PullRequestCard
+          run={active}
+          hostedPreview={hostedPreview}
+          consent={prConsent}
+          setConsent={setPrConsent}
+          creating={prCreating}
+          progress={prProgress}
+          prError={prError}
+          onOpenPr={() => void startPullRequest()}
+        />
 
         <div className="mt-5 grid gap-5 xl:grid-cols-[350px_minmax(0,1fr)]">
           <aside className="space-y-5">
@@ -789,6 +931,94 @@ function Repo({ run, copy, download, openHow }: { run: PilotRun; copy: () => voi
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function PullRequestCard({
+  run,
+  hostedPreview,
+  consent,
+  setConsent,
+  creating,
+  progress,
+  prError,
+  onOpenPr,
+}: {
+  run: PilotRun;
+  hostedPreview: boolean;
+  consent: boolean;
+  setConsent: (value: boolean) => void;
+  creating: boolean;
+  progress: string[];
+  prError: RunError | null;
+  onOpenPr: () => void;
+}) {
+  const hasPatch = Boolean(run.patch && run.files.length > 0);
+  const refused = run.status === "refused";
+  const opened = run.pullRequest?.status === "opened" && run.pullRequest.prUrl;
+  const disabled = creating || hostedPreview || !hasPatch || refused;
+  return (
+    <div className="mt-5 rounded-md border border-[#30363d] bg-[#161b22] p-4">
+      <div className="sm:flex sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="font-mono text-[11px] font-medium uppercase tracking-[.14em] text-[#58a6ff]">Pull request</p>
+          <p className="mt-1 text-sm font-medium text-white">
+            {opened ? "PR opened — review before merging" : "Turn this patch into a PR branch"}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-[#8b949e]">
+            Codex Pilot clones the repo, applies the reviewed diff on a <span className="font-mono">codex-pilot/issue-N-*</span> branch,
+            pushes that branch only, and opens a pull request. It never pushes to <span className="font-mono">{run.repository.branch}</span>.
+            {hostedPreview ? " PRs are disabled in this hosted preview — run locally." : ""}
+          </p>
+        </div>
+        <div className="mt-4 flex shrink-0 items-center gap-2 sm:mt-0">
+          <button
+            onClick={onOpenPr}
+            disabled={disabled}
+            className="inline-flex items-center gap-1.5 rounded-md bg-[#238636] px-3.5 py-2 text-xs font-medium text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Icon name="arrow" />
+            {creating ? "Opening PR…" : opened ? "PR opened" : "Open pull request"}
+          </button>
+        </div>
+      </div>
+      {opened ? (
+        <div className="mt-3 rounded border border-[#238636]/40 bg-[#238636]/10 p-3 text-xs">
+          <a href={run.pullRequest!.prUrl} target="_blank" rel="noreferrer" className="font-medium text-[#aff5b4] hover:underline">
+            View pull request{run.pullRequest!.prNumber ? ` #${run.pullRequest!.prNumber}` : ""} ↗
+          </a>
+          <p className="mt-1 font-mono text-[11px] text-[#8b949e]">Branch: {run.pullRequest!.branch}</p>
+        </div>
+      ) : (
+        <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs text-[#8b949e]">
+          <input
+            type="checkbox"
+            checked={consent}
+            disabled={creating || !hasPatch || refused}
+            onChange={(event) => setConsent(event.target.checked)}
+            className="mt-0.5 h-3.5 w-3.5 accent-[#238636]"
+          />
+          <span>I approve pushing a feature branch and opening a pull request for this reviewed patch.</span>
+        </label>
+      )}
+      {prError && (
+        <div role="alert" className="mt-3 rounded border border-[#f85149]/40 bg-[#f85149]/[.08] p-3 text-xs">
+          <p className="font-medium text-[#ff7b72]">{prError.title}</p>
+          <p className="mt-1 text-[#c9d1d9]">{prError.message}</p>
+          <p className="mt-1 font-mono text-[11px] text-[#8b949e]">Code: {prError.code}</p>
+        </div>
+      )}
+      {progress.length > 0 && !opened && (
+        <div className="mt-3 max-h-32 space-y-1 overflow-auto rounded border border-[#30363d] bg-[#0d1117] p-3 font-mono text-[11px] text-[#8b949e]">
+          {progress.slice(-8).map((line, index) => (
+            <p key={`${index}-${line}`}>{line}</p>
+          ))}
+        </div>
+      )}
+      {refused && hasPatch && (
+        <p className="mt-2 text-[11px] text-[#d29922]">Refused runs never open PRs. Resolve the reviewer concerns first.</p>
+      )}
     </div>
   );
 }
@@ -1674,8 +1904,8 @@ function VerificationPanel({
 
       <div className="rounded-md border border-[#30363d] bg-[#161b22] p-4 text-xs text-[#8b949e] space-y-1">
         <p className="font-medium text-[#c9d1d9]">Developer-side QA contract</p>
-        <p>• Runs inside a temporary, disposable working directory (.codex-pilot/workspaces/)</p>
-        <p>• Never automatically commits, pushes, or opens pull requests</p>
+        <p>• Patch review stays inside a temporary, disposable working directory</p>
+        <p>• Pull requests open a feature branch only after your approval — never pushes to the base branch</p>
         <p>• Preserves user clones and cleans up temporary files immediately after verification</p>
       </div>
     </div>
@@ -1720,7 +1950,7 @@ function How({ run, close }: { run: PilotRun; close: () => void }) {
           ))}
         </div>
         <p className="border-t border-[#30363d] px-5 py-4 text-xs leading-5 text-[#8b949e]">
-          Codex Pilot does not execute target repository code. Use the downloaded patch for developer-side QA.
+          Codex Pilot does not execute target repository code. Use the downloaded patch for developer-side QA, or approve a feature-branch pull request to review it on GitHub.
         </p>
       </div>
     </div>
