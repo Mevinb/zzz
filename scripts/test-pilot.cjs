@@ -1,7 +1,26 @@
 const assert = require('node:assert/strict');
 const load = require('./load-pilot.cjs');
-const { streamPilotRun } = load('pilot');
-const { normalizeQuery, candidateScore, relatedPaths, proposedDiff, extractStructuredRequirements } = load('investigation');
+const { streamPilotRun, explorerSchema, plannerSchema, coderSchema, reviewSchema } = load('pilot');
+const { normalizeQuery, candidateScore, relatedPaths, proposedDiff, extractStructuredRequirements, analysisSchema } = load('investigation');
+// Strict structured output rejects any object schema where a properties key is
+// missing from required (once broke every patch-writing call: missing 'role').
+function assertStrictSchema(name, schema) {
+  if (!schema || typeof schema !== 'object') return;
+  if (schema.type === 'object') {
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(schema.properties || {})) {
+        assert.ok((schema.required || []).includes(key), `${name}: property '${key}' missing from required`);
+      }
+    }
+    for (const [key, sub] of Object.entries(schema.properties || {})) assertStrictSchema(`${name}.${key}`, sub);
+  }
+  if (schema.type === 'array' && schema.items) assertStrictSchema(`${name}[]`, schema.items);
+}
+for (const [name, schema] of [['analysis', analysisSchema], ['explorer', explorerSchema], ['planner', plannerSchema], ['coder', coderSchema], ['reviewer', reviewSchema]]) {
+  assert.ok(schema, `${name} schema is exported`);
+  assertStrictSchema(name, schema);
+}
+console.log('PASS agent schemas satisfy strict required-properties invariant');
 const analysis = { kinds: ['validation'], summary: 'Reject empty names', expectedBehavior: 'Empty names rejected', observedBehavior: 'Empty names accepted', importantSymbols: ['validateName'], importantPaths: ['src/validator.ts'], errorMessages: [], likelyEvidenceSurfaces: ['validator', 'test'], maintainerClarifications: [], reproductionDetails: [], proposedApproaches: [], constraints: [] };
 for (const query of ['index', 'package', 'source', 'the export map and readme', 'Search package.json and build configuration to understand runtime entry points']) assert.equal(normalizeQuery(query), null);
 for (const query of ['clsx/lite', 'moduleResolution', 'typesVersions', 'ClassValue', 'declare namespace clsx']) assert.equal(normalizeQuery(query), query);
@@ -86,25 +105,25 @@ async function scenario(name, options = {}) {
           assert.match(prompt, /PREVIOUS PROPOSED CONTENTS/);
         }
         if (options.gateRepair && coderCalls === 1) {
-          return JSON.stringify({ changes: [{ path: 'src/validator.ts', operation: 'modify', updatedContent: 'export const dummy = 1;\n', explanation: 'Missing validateName', requirementsCovered: ['R1', 'R2'] }] });
+          return JSON.stringify({ changes: [{ path: 'src/validator.ts', operation: 'modify', updatedContent: 'export const dummy = 1;\n', explanation: 'Missing validateName', role: 'source', requirementsCovered: ['R1', 'R2'] }] });
         }
         if (options.missingRequiredSymbol) {
-          return JSON.stringify({ changes: [{ path: 'src/validator.ts', operation: 'modify', updatedContent: 'export const dummy = 1;\n', explanation: 'Missing validateName', requirementsCovered: ['R1', 'R2'] }] });
+          return JSON.stringify({ changes: [{ path: 'src/validator.ts', operation: 'modify', updatedContent: 'export const dummy = 1;\n', explanation: 'Missing validateName', role: 'source', requirementsCovered: ['R1', 'R2'] }] });
         }
         if (options.testOnlyPatch) {
-          return JSON.stringify({ changes: [{ path: 'test/validator.test.ts', operation: 'modify', updatedContent: 'it("works", () => {});\n', explanation: 'Tests only', requirementsCovered: ['R3'] }] });
+          return JSON.stringify({ changes: [{ path: 'test/validator.test.ts', operation: 'modify', updatedContent: 'it("works", () => {});\n', explanation: 'Tests only', role: 'test', requirementsCovered: ['R3'] }] });
         }
         if (options.createFile) {
           return JSON.stringify({ changes: [
-            { path: 'src/new-validator.ts', operation: 'create', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'New isolated validator API', requirementsCovered: ['R1', 'R2'] },
-            { path: 'test/validator.test.ts', operation: 'modify', updatedContent: 'import { validateName } from "../src/new-validator";\nit("rejects empty names", () => { if (validateName("")) throw new Error("expected false"); });\n', explanation: 'Test new validator API', requirementsCovered: ['R3'] },
+            { path: 'src/new-validator.ts', operation: 'create', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'New isolated validator API', role: 'source', requirementsCovered: ['R1', 'R2'] },
+            { path: 'test/validator.test.ts', operation: 'modify', updatedContent: 'import { validateName } from "../src/new-validator";\nit("rejects empty names", () => { if (validateName("")) throw new Error("expected false"); });\n', explanation: 'Test new validator API', role: 'test', requirementsCovered: ['R3'] },
           ] });
         }
         if (options.unsolicitedDocs) {
-          return JSON.stringify({ changes: [{ path: 'src/validator.ts', operation: 'modify', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Validator', requirementsCovered: ['R1', 'R2'] }, { path: 'README.md', operation: 'modify', updatedContent: '# Changed\n', explanation: 'Docs', requirementsCovered: ['R2'] }] });
+          return JSON.stringify({ changes: [{ path: 'src/validator.ts', operation: 'modify', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Validator', role: 'source', requirementsCovered: ['R1', 'R2'] }, { path: 'README.md', operation: 'modify', updatedContent: '# Changed\n', explanation: 'Docs', role: 'docs', requirementsCovered: ['R2'] }] });
         }
         const source = options.badPath ? 'src/secret.ts' : options.plannerBackroute ? 'src/follow20.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts';
-        return JSON.stringify({ changes: [{ path: source, operation: 'modify', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Reject empty names', requirementsCovered: ['R1', 'R2'] }, { path: 'test/validator.test.ts', operation: 'modify', updatedContent: 'import { validateName } from "../src/validator";\nit("rejects empty names", () => { if (validateName("")) throw new Error("expected false"); });\n', explanation: 'Test empty names', requirementsCovered: ['R3'] }] });
+        return JSON.stringify({ changes: [{ path: source, operation: 'modify', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Reject empty names', role: 'source', requirementsCovered: ['R1', 'R2'] }, { path: 'test/validator.test.ts', operation: 'modify', updatedContent: 'import { validateName } from "../src/validator";\nit("rejects empty names", () => { if (validateName("")) throw new Error("expected false"); });\n', explanation: 'Test empty names', role: 'test', requirementsCovered: ['R3'] }] });
       }
       reviews++;
       if (options.firstReviewRefuses) {
