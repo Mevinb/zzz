@@ -1,3 +1,4 @@
+import { logWarn } from "@/lib/logger";
 import { verifyPatch, type VerificationOptions } from "@/lib/verification";
 
 export const runtime = "nodejs";
@@ -8,9 +9,11 @@ export async function POST(request: Request) {
   try {
     body = (await request.json()) as VerificationOptions;
     if (!body || typeof body.patch !== "string" || !body.patch.trim()) {
+      logWarn("api/verify", "Rejected verify request: missing patch", { code: "bad_request" });
       return Response.json({ error: "A valid patch diff is required." }, { status: 400 });
     }
   } catch {
+    logWarn("api/verify", "Rejected verify request: invalid body", { code: "bad_request" });
     return Response.json({ error: "Invalid request body." }, { status: 400 });
   }
 

@@ -31,6 +31,12 @@ Open `http://localhost:3000`. Add `GITHUB_TOKEN` to `.env.local` if GitHub’s u
 
 Codex Pilot labels generated changes **PATCH PROPOSED — NOT EXECUTED**. It captures the analyzed commit SHA and preserves the canonical diff and review record; download the patch and run repository-defined QA in an approved developer environment, or approve a feature-branch PR and review it on GitHub before merging.
 
+## Logs
+
+Open `/logs` (or the **Logs** button in the header) to watch server activity and errors — run failures, PR flow failures, and client-side interruptions stream there live with level filters and text search. Secrets are redacted before storing; the buffer keeps the last 500 entries in memory per server instance.
+
+If a run fails, the banner names the failed stage (e.g. "Failed at: Generating patch") with an error code and a **View logs** link. Codex step failures distinguish timeouts (`CODEX_TIMEOUT`, 180s per step), crashes (`CODEX_EXIT`, exit code + last output), and auth problems (`CODEX_UNAVAILABLE`). Retry always restarts from scratch. The agent activity panel collapses completed stages — expand one to see its steps.
+
 The deterministic regression suite covers explicit requirement-to-plan-to-patch coverage, stable revision pinning, planner repair, patch persistence, bounded revisions, and manual-QA-only verification behavior.
 
 If Codex cannot return a supported, confident edit, the app clearly refuses to offer an empty patch. GitHub rate limits, private or missing repositories, closed issues, unsupported files, and large repositories receive dedicated failure states.

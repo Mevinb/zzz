@@ -76,6 +76,7 @@ async function scenario(name, options = {}) {
       }
       if (schema.required.includes('changes')) {
         coderCalls++;
+        if (options.codexFailsAtCoder) throw Object.assign(new Error('coder exploded'), { code: 'CODEX_EXIT', exitCode: 1, stderr: 'model overloaded, try again later (sentinel-codex-stderr-9z9z)' });
         if (coderCalls === 2) {
           if (options.gateRepair) {
             assert.match(prompt, /STATIC SANITY GATE FAILED/);
@@ -120,6 +121,23 @@ async function scenario(name, options = {}) {
   } else if (options.invalidPlan) {
     assert.equal(terminal.error.code, 'PLAN_SCOPE_INVALID'); assert.match(terminal.error.message, /invented.ts/); assert.ok(plans >= 2); assert.equal(coderCalls, 0);
   } else if (options.malformed && !options.recover) { assert.equal(terminal.error.code, 'MALFORMED_AGENT_OUTPUT'); }
+  else if (options.codexFailsAtCoder) {
+    assert.equal(terminal.type, 'failed');
+    assert.equal(terminal.error.code, 'CODEX_EXIT');
+    assert.match(terminal.error.title, /patch writing/);
+    assert.match(terminal.error.message, /patch writing/);
+    assert.match(terminal.error.message, /model overloaded/);
+    assert.doesNotMatch(terminal.error.message, /sentinel-codex-stderr-9z9z/);
+    const failedRun = terminal.run;
+    assert.equal(failedRun.stages.find((s) => s.id === 'writing').status, 'failed');
+    for (const id of ['reviewing', 'revising', 'verifying']) {
+      const st = failedRun.stages.find((s) => s.id === id);
+      assert.equal(st.status, 'skipped');
+      assert.equal(st.elapsedMs, undefined);
+    }
+    assert.ok(failedRun.evidence && failedRun.plan.length > 0 && failedRun.inspectedFiles.length > 0);
+    assert.equal(failedRun.patchVersions.length, 0);
+  }
   else {
     assert.equal(terminal.type, 'completed', JSON.stringify(terminal)); const run = terminal.run;
     assert.ok(run.stages.every((stage) => !['pending', 'active'].includes(stage.status)));
@@ -204,4 +222,10 @@ async function scenario(name, options = {}) {
   await scenario('missing required symbol rejected by pre-review static gate', { missingRequiredSymbol: true });
   await scenario('unsolicited docs change rejected by pre-review static gate', { unsolicitedDocs: true });
   await scenario('pre-review static gate triggers repair loop and recovers', { gateRepair: true });
+  process.env.GITHUB_PR_TOKEN = 'sentinel-codex-stderr-9z9z';
+  try {
+    await scenario('codex failure at writing keeps evidence and names the stage', { codexFailsAtCoder: true });
+  } finally {
+    delete process.env.GITHUB_PR_TOKEN;
+  }
 })();

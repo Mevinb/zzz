@@ -1,3 +1,4 @@
+import { logError, logInfo, logWarn } from "@/lib/logger";
 import { streamPilotRun } from "@/lib/pilot";
 import type { RunEvent } from "@/lib/pilot-types";
 
@@ -11,7 +12,9 @@ export async function POST(request: Request) {
     if (typeof body.issueUrl !== "string" || body.issueUrl.length > 500) throw new Error("Enter a valid GitHub issue URL.");
     issueUrl = body.issueUrl;
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "Enter a valid GitHub issue URL." }, { status: 400 });
+    const message = error instanceof Error ? error.message : "Enter a valid GitHub issue URL.";
+    logWarn("api/runs", `Rejected run request: ${message}`, { code: "bad_request" });
+    return Response.json({ error: message }, { status: 400 });
   }
   const encoder = new TextEncoder();
   if (process.env.CODEX_PILOT_LIVE_RUNS === "false" || process.env.VERCEL === "1") {
@@ -32,12 +35,24 @@ export async function POST(request: Request) {
     return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform" } });
   }
   let disconnected = false;
-  console.log(`[Codex Pilot] Investigating issue: ${issueUrl}`);
+  logInfo("api/runs", `Investigating issue: ${issueUrl}`);
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const emit = (event: RunEvent) => { if (!disconnected) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); };
+      const emit = (event: RunEvent) => {
+        if (event.type === "failed") {
+          const failedStage = event.run?.stages.find((stage) => stage.status === "failed")?.label;
+          logError("api/runs", `Run failed for ${issueUrl}${failedStage ? ` at ${failedStage}` : ""}: ${event.error.title} — ${event.error.message}`, {
+            code: event.error.code,
+          });
+        } else if (event.type === "completed" && event.run.status === "refused") {
+          logWarn("api/runs", `Run refused for ${issueUrl}: ${event.run.refusal?.reason || "no reason given"}`, {
+            code: event.run.refusal?.kind,
+          });
+        }
+        if (!disconnected) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      };
       void streamPilotRun(issueUrl, emit).finally(() => {
-        console.log(`[Codex Pilot] Finished investigating issue: ${issueUrl}`);
+        logInfo("api/runs", `Finished investigating issue: ${issueUrl}`);
         if (!disconnected) controller.close();
       });
     },

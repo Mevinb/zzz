@@ -63,6 +63,25 @@ test("paste URL starts a streamed run and keeps proposed revisions, code, diff, 
   expect((await download).suggestedFilename()).toBe("issue-1-proposal.diff");
 });
 
+function failedRun() {
+  const base = completedRun("refused");
+  return {
+    ...base,
+    files: [], patch: "", originalPatch: undefined, revisedPatch: undefined, finalPatch: undefined, patchVersions: [],
+    stages: [
+      { id: "understanding", label: "Understanding issue", status: "complete", elapsedMs: 5 },
+      { id: "exploring", label: "Exploring repository", status: "complete", elapsedMs: 8 },
+      { id: "evidence", label: "Evidence gate", status: "complete", elapsedMs: 9 },
+      { id: "planning", label: "Planning", status: "complete", elapsedMs: 10 },
+      { id: "writing", label: "Generating patch", status: "failed", elapsedMs: 12 },
+      { id: "reviewing", label: "Reviewing patch", status: "skipped" },
+      { id: "revising", label: "Revising patch", status: "skipped" },
+      { id: "verifying", label: "Verifying patch", status: "skipped" },
+    ],
+    refusal: { kind: "insufficient_evidence", title: "Codex step timed out (patch writing)", reason: "One Codex step exceeded the limit.", suggestedNextStep: "Retry from scratch.", code: "CODEX_TIMEOUT" },
+  };
+}
+
 test("a reviewer refusal renders without hiding the preserved patch versions", async ({ page }) => {
   await streamRun(page, completedRun("refused"));
   await page.goto("/");
@@ -74,4 +93,31 @@ test("a reviewer refusal renders without hiding the preserved patch versions", a
   await expect(page.getByRole("button", { name: "Patch v1" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Patch v2 (Revised)" })).toBeVisible();
   await expect(page.getByText("new file mode 100644")).toBeVisible();
+});
+
+test("a codex failure names the stage, shows the code, and links to logs", async ({ page }) => {
+  const failed = {
+    type: "failed",
+    error: {
+      code: "CODEX_TIMEOUT",
+      title: "Codex step timed out (patch writing)",
+      message: "One Codex step exceeded the 180s limit during patch writing.",
+      retryable: true,
+    },
+    run: failedRun(),
+  };
+  await page.route("**/api/runs**", (route) => route.fulfill({
+    contentType: "text/event-stream",
+    body: [`data: ${JSON.stringify(context)}`, `data: ${JSON.stringify(failed)}`].join("\n\n") + "\n\n",
+  }));
+  await page.goto("/");
+  await page.getByLabel("GitHub issue URL").fill("https://github.com/fixture/repo/issues/1");
+  const request = page.waitForRequest("**/api/runs**");
+  await page.getByRole("button", { name: "Run investigation" }).click();
+  await request;
+  await expect(page.getByText("Failed at: Generating patch — Codex step timed out (patch writing)")).toBeVisible();
+  await expect(page.getByText("code: CODEX_TIMEOUT", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "View logs" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry from scratch" })).toBeVisible();
+  await expect(page.getByText("No patch yet — the PR button appears here once a patch is proposed.")).toBeVisible();
 });

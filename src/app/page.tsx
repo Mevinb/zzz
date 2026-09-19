@@ -249,6 +249,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const verifying = false;
   const [error, setError] = useState<RunError | null>(null);
+  const [failedStage, setFailedStage] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [how, setHow] = useState(false);
   const [prConsent, setPrConsent] = useState(false);
@@ -285,7 +286,13 @@ export default function Home() {
       return;
     }
     if (event.type === "failed") {
-      if (event.run) setRun(event.run);
+      if (event.run) {
+        setRun(event.run);
+        const failed = event.run.stages.find((stage) => stage.status === "failed");
+        setFailedStage(failed ? failed.label : null);
+      } else {
+        setFailedStage(null);
+      }
       setError(event.error);
       setLoading(false);
       return;
@@ -309,6 +316,7 @@ export default function Home() {
     if (loading || verifying) return;
     const issueUrl = supplied || url;
     setError(null);
+    setFailedStage(null);
     setFileIndex(0);
     setSelectedVersion(undefined);
     setExpanded(null);
@@ -369,12 +377,14 @@ export default function Home() {
       }
       if (!terminal) throw new Error("The investigation connection ended before a result arrived. Please retry.");
     } catch (caught) {
-      setError({
+      const failure: RunError = {
         code: "network_error",
         title: "Investigation interrupted",
         message: caught instanceof Error ? caught.message : "Check your connection and try again.",
         retryable: true,
-      });
+      };
+      setError(failure);
+      reportClientError("investigation", failure);
       setRun((previous) => (previous ? { ...previous, stages: previous.stages?.map((stage) => ({ ...stage, status: stage.status === "active" ? "failed" : stage.status === "pending" ? "skipped" : stage.status })) } : previous));
     } finally {
       setLoading(false);
@@ -654,9 +664,22 @@ export default function Home() {
         retryable: true,
       };
       setPrError(err);
+      reportClientError("pull-request", err);
       setRun((prev) => (prev ? { ...prev, pullRequest: { status: "failed", error: err } } : prev));
     } finally {
       setPrCreating(false);
+    }
+  }
+
+  function reportClientError(source: string, error: RunError) {
+    try {
+      void fetch("/api/logs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ level: "error", source, message: `${error.title} — ${error.message}`, code: error.code }),
+      }).catch(() => undefined);
+    } catch {
+      // Reporting must never break the UI.
     }
   }
 
@@ -692,7 +715,10 @@ export default function Home() {
               Issue investigation & patch proposal workspace
             </span>
           </Link>
-          <div className="flex items-center gap-2 text-xs text-[#8b949e]">
+          <div className="flex items-center gap-3 text-xs text-[#8b949e]">
+            <Link href="/logs" className="rounded-md border border-[#30363d] px-2.5 py-1.5 text-[#c9d1d9] hover:bg-[#21262d]">
+              Logs
+            </Link>
             <span className={(loading || verifying ? "animate-pulse bg-[#58a6ff]" : "bg-[#3fb950]") + " h-2 w-2 rounded-full"} />
             {loading ? activeStage?.label || "Starting" : verifying ? "Verifying patch…" : hostedPreview ? "Hosted sample" : "Local agent ready"}
           </div>
@@ -776,12 +802,23 @@ export default function Home() {
       <section className="mx-auto max-w-[1440px] px-4 py-5 sm:px-6">
         {error && (
           <div role="alert" className="mb-5 rounded-md border border-[#f85149]/40 bg-[#f85149]/[.08] p-4">
-            <p className="text-sm font-medium text-[#ff7b72]">{error.title}</p>
+            <p className="text-sm font-medium text-[#ff7b72]">
+              {failedStage ? `Failed at: ${failedStage} — ` : ""}{error.title}
+            </p>
+            <p className="mt-1 font-mono text-[11px] text-[#8b949e]">code: {error.code}</p>
             <p className="mt-1 text-sm text-[#c9d1d9]">{error.message}</p>
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
+              {error.retryable && (
+                <button onClick={(event) => start(event as unknown as FormEvent)} className="text-[#58a6ff] hover:underline">
+                  Retry from scratch
+                </button>
+              )}
+              <Link href="/logs" className="text-[#58a6ff] hover:underline">
+                View logs
+              </Link>
+            </div>
             {error.retryable && (
-              <button onClick={(event) => start(event as unknown as FormEvent)} className="mt-2 text-sm text-[#58a6ff] hover:underline">
-                Try again
-              </button>
+              <p className="mt-1 text-xs text-[#8b949e]">Retrying discards this run&apos;s progress and starts over.</p>
             )}
           </div>
         )}
@@ -958,6 +995,14 @@ function PullRequestCard({
   const refused = run.status === "refused";
   const opened = run.pullRequest?.status === "opened" && run.pullRequest.prUrl;
   const disabled = creating || hostedPreview || !hasPatch || refused;
+  if (!hasPatch && !opened && !prError && progress.length === 0) {
+    return (
+      <div className="mt-5 rounded-md border border-[#30363d] bg-[#161b22] p-4">
+        <p className="font-mono text-[11px] font-medium uppercase tracking-[.14em] text-[#58a6ff]">Pull request</p>
+        <p className="mt-1 text-xs text-[#8b949e]">No patch yet — the PR button appears here once a patch is proposed.</p>
+      </div>
+    );
+  }
   return (
     <div className="mt-5 rounded-md border border-[#30363d] bg-[#161b22] p-4">
       <div className="sm:flex sm:items-center sm:justify-between">
@@ -1117,26 +1162,43 @@ function PatchHeader({
 
 function Stage({ stage, activity }: { stage: PilotRun["stages"][number]; activity: Activity[] }) {
   const active = stage.status === "active";
+  const failed = stage.status === "failed";
+  // Auto-expand the stage that needs attention; a manual toggle always wins.
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? (active || failed);
+  const visible = activity.slice(-8);
   return (
     <div className="px-4 py-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span
             className={
-              (active ? "animate-spin border-[#58a6ff] border-t-transparent" : stage.status === "complete" ? "border-[#3fb950] bg-[#3fb950]" : stage.status === "failed" ? "border-[#d29922]" : "border-[#484f58]") +
+              (active ? "animate-spin border-[#58a6ff] border-t-transparent" : stage.status === "complete" ? "border-[#3fb950] bg-[#3fb950]" : failed ? "border-[#d29922]" : "border-[#484f58]") +
               " h-3 w-3 rounded-full border"
             }
           />
           <p className={(active ? "text-[#79c0ff]" : "text-[#c9d1d9]") + " text-xs font-medium"}>
             {stage.label}
-            {(stage.status === "skipped" || stage.status === "failed") && <span className="ml-2 text-[#8b949e]">— {stage.status}</span>}
+            {(stage.status === "skipped" || failed) && <span className="ml-2 text-[#8b949e]">— {stage.status}</span>}
           </p>
         </div>
         {stage.elapsedMs && <span className="font-mono text-[10px] text-[#6e7681]">{formatTime(stage.elapsedMs)}</span>}
       </div>
       {activity.length > 0 && (
+        <button
+          aria-expanded={open}
+          onClick={() => setManualOpen(!open)}
+          className="ml-5 mt-1 font-mono text-[10px] text-[#58a6ff] hover:underline"
+        >
+          {open ? "Hide steps" : `Show ${activity.length} step${activity.length === 1 ? "" : "s"}`}
+        </button>
+      )}
+      {open && activity.length > 0 && (
         <div className="ml-5 mt-2 space-y-1 border-l border-[#30363d] pl-3">
-          {activity.map((item) => (
+          {activity.length > visible.length && (
+            <p className="text-[11px] text-[#6e7681]">+{activity.length - visible.length} earlier steps hidden</p>
+          )}
+          {visible.map((item) => (
             <p key={item.id} className={(item.status === "warning" ? "text-[#d29922]" : "text-[#8b949e]") + " text-[11px] leading-4"}>
               {item.action}
               <span className="block text-[#6e7681]">{item.detail}</span>

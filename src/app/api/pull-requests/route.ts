@@ -1,3 +1,4 @@
+import { logError, logInfo, logWarn } from "@/lib/logger";
 import { getPrMode, isHostedPreview, isPrEnabled, openPullRequest, type PullRequestEvent, type PullRequestInput } from "@/lib/pull-request";
 
 export const runtime = "nodejs";
@@ -23,11 +24,13 @@ export async function POST(request: Request) {
       return Response.json({ error: "repositoryUrl, branch, issue, and patch are required." }, { status: 400 });
     }
   } catch {
+    logWarn("api/pull-requests", "Rejected PR request: invalid body", { code: "bad_request" });
     return Response.json({ error: "Invalid request body." }, { status: 400 });
   }
 
   const encoder = new TextEncoder();
   const refused = (code: string, title: string, message: string): Response => {
+    logWarn("api/pull-requests", `Refused PR request: ${title} — ${message}`, { code });
     const event: PullRequestEvent = { type: "failed", error: { code, title, message } };
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -55,10 +58,17 @@ export async function POST(request: Request) {
   }
 
   let disconnected = false;
-  console.log(`[Codex Pilot] Opening PR for issue #${input.issue?.number} in ${input.repositoryUrl} (mode=${getPrMode()})`);
+  logInfo("api/pull-requests", `Opening PR for issue #${input.issue?.number} in ${input.repositoryUrl} (mode=${getPrMode()})`);
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const emit = (event: PullRequestEvent) => {
+        if (event.type === "failed") {
+          logError("api/pull-requests", `PR flow failed for issue #${input.issue?.number}: ${event.error.title} — ${event.error.message}`, {
+            code: event.error.code,
+          });
+        } else if (event.type === "completed") {
+          logInfo("api/pull-requests", `PR opened for issue #${input.issue?.number}: ${event.result.prUrl}`);
+        }
         if (!disconnected) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
       };
       // Never push to the base branch; the library pushes a feature branch only.
@@ -76,7 +86,7 @@ export async function POST(request: Request) {
           });
         })
         .finally(() => {
-          console.log(`[Codex Pilot] Finished PR flow for issue #${input.issue?.number}`);
+          logInfo("api/pull-requests", `Finished PR flow for issue #${input.issue?.number}`);
           if (!disconnected) controller.close();
         });
     },
