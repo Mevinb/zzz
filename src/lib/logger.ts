@@ -32,7 +32,7 @@ function truncate(value: string, max: number): string {
 
 function secretValues(): string[] {
   const values: string[] = [];
-  for (const key of ["GITHUB_PR_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"]) {
+  for (const key of ["GITHUB_PR_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"]) {
     const value = process.env[key];
     if (value && value.trim().length >= 4) values.push(value.trim());
   }
@@ -55,6 +55,7 @@ export function redactSecrets(text: string): string {
     .replace(/x-access-token:[^\s"'`]+/g, "x-access-token:***")
     .replace(/gh[pousr]_[A-Za-z0-9]+/g, "***")
     .replace(/github_pat_[A-Za-z0-9_]+/g, "***")
+    .replace(/sk-[A-Za-z0-9-_]{10,}/g, "***")
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/g, "Bearer ***");
   return out;
 }

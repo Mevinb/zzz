@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import type { Activity, InspectedFile, PilotRun, RunError, RunEvent, VerificationReport } from "@/lib/pilot-types";
+import { readSettings } from "@/lib/settings-client";
 
 const examples = [
   { label: "clsx #100", url: "https://github.com/lukeed/clsx/issues/100" },
@@ -280,14 +281,18 @@ export default function Home() {
   const [prError, setPrError] = useState<RunError | null>(null);
   const [prProgress, setPrProgress] = useState<string[]>([]);
   const [restoredAt, setRestoredAt] = useState<string | null>(null);
+  const [engineLabel, setEngineLabel] = useState("Local Codex CLI");
 
   const hostedPreview = useSyncExternalStore(subscribeToLocation, hostedPreviewFromLocation, () => configuredHostedPreview);
   const active = (run || sample) as PilotRun;
   const activeStage = active.stages.find((stage) => stage.status === "active");
 
-  // Restore the last finished run once on mount (effect-only: no SSR/localStorage mismatch).
+  // Restore the last finished run + engine label once on mount
+  // (effect-only: no SSR/localStorage mismatch).
   /* eslint-disable react-hooks/set-state-in-effect -- mount-only restore from external localStorage snapshot */
   useEffect(() => {
+    const engine = readSettings();
+    setEngineLabel(engine.provider === "openai" ? `OpenAI API (${engine.openaiModel})` : "Local Codex CLI");
     const saved = readSavedRun();
     if (saved) {
       setRun(saved.run);
@@ -415,10 +420,22 @@ export default function Home() {
       });
       return;
     }
+    // The server reports a missing key as a typed failed event; no client gate needed.
+    const engine = readSettings();
     setRun(null);
     setLoading(true);
     try {
-      const response = await fetch("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ issueUrl }) });
+      const response = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          issueUrl,
+          provider: engine.provider,
+          ...(engine.provider === "openai"
+            ? { openaiApiKey: engine.openaiApiKey, openaiModel: engine.openaiModel }
+            : {}),
+        }),
+      });
       if (!response.ok || !response.body) {
         const data = (await response.json().catch(() => ({}))) as { error?: string };
         throw new Error(data.error || "Could not start Codex Pilot.");
@@ -799,9 +816,15 @@ export default function Home() {
             </span>
           </Link>
           <div className="flex items-center gap-3 text-xs text-[#8b949e]">
+            <Link href="/settings" className="rounded-md border border-[#30363d] px-2.5 py-1.5 text-[#c9d1d9] hover:bg-[#21262d]">
+              Settings
+            </Link>
             <Link href="/logs" className="rounded-md border border-[#30363d] px-2.5 py-1.5 text-[#c9d1d9] hover:bg-[#21262d]">
               Logs
             </Link>
+            <span className="hidden font-mono text-[11px] text-[#6e7681] md:block" title="Engine powering investigations">
+              {engineLabel}
+            </span>
             <span className={(loading || verifying ? "animate-pulse bg-[#58a6ff]" : "bg-[#3fb950]") + " h-2 w-2 rounded-full"} />
             {loading ? activeStage?.label || "Starting" : verifying ? "Verifying patch…" : hostedPreview ? "Hosted sample" : "Local agent ready"}
             {restoredAt && !loading && (

@@ -113,6 +113,9 @@ export default function LogsPage() {
             </span>
           </div>
           <div className="flex items-center gap-2 text-xs text-[#8b949e]">
+            <Link href="/settings" className="rounded-md border border-[#30363d] px-2.5 py-1.5 text-[#c9d1d9] hover:bg-[#21262d]">
+              Settings
+            </Link>
             <span className="font-mono">
               {entries.length} entries · {errors} errors · {warns} warnings{dropped > 0 ? ` · ${dropped} dropped` : ""}
             </span>

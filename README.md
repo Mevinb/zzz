@@ -32,6 +32,15 @@ Open `http://localhost:3000`. Add `GITHUB_TOKEN` to `.env.local` if GitHub’s u
 
 Codex Pilot labels generated changes **PATCH PROPOSED — NOT EXECUTED**. It captures the analyzed commit SHA and preserves the canonical diff and review record; download the patch and run repository-defined QA in an approved developer environment, or approve a feature-branch PR and review it on GitHub before merging.
 
+## Engine settings
+
+The header shows which engine powers investigations. Open **Settings** to choose:
+
+- **Local Codex CLI** (default) — uses your subscription via `codex login` on this machine.
+- **OpenAI API** — calls the OpenAI Responses API directly with strict structured output. Handy when your Codex limit runs out; billed by OpenAI.
+
+Your API key and model live only in the browser (`localStorage`) and travel with each run request — never stored on the server, never logged (redacted like all secrets). A server-side `OPENAI_API_KEY` fills in when the browser has none, and `CODEX_PILOT_PROVIDER=openai` forces the API engine for everyone.
+
 ## Logs
 
 Open `/logs` (or the **Logs** button in the header) to watch server activity and errors — run failures, PR flow failures, and client-side interruptions stream there live with level filters and text search. Secrets are redacted before storing; the buffer keeps the last 500 entries in memory per server instance.
